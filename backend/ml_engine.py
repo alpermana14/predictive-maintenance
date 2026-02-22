@@ -87,6 +87,13 @@ def load_conveyor_data():
         #df = df.groupby("datetime").first().resample("30min").ffill() #make the Nan value filled with last value
         df = df.groupby("datetime").first().resample("30min").asfreq() # After grouping/resampling, gaps appear as NaNs
         
+        # --- NEW FIX: FORCE COLUMNS TO BE NUMBERS ---
+        # This prevents the "Cannot interpolate with str dtype" error
+        for col in TARGETS:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        # --------------------------------------------
+
         df = apply_imputation(df, TARGETS)
 
         # Clean columns
