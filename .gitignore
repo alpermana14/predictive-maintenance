@@ -12,6 +12,7 @@ frontend/dist/
 frontend/build/
 frontend/.env
 frontend/.env.local
+node_modules/
 
 # --- System ---
 .DS_Store
