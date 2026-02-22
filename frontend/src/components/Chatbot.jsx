@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-
-export default function Chatbot() {
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState("");
@@ -33,7 +32,7 @@ export default function Chatbot() {
         setLoading(true);
 
         try {
-            const res = await axios.post('http://localhost:8000/api/chat', {
+            const res = await axios.post('${API_URL}/chat', {
                 message: newMsg.content,
                 session_id: sessionId
             });
@@ -59,7 +58,7 @@ export default function Chatbot() {
         try {
             setLoading(true);
             // Call the new backend endpoint we discussed
-            const res = await axios.post('http://localhost:8000/api/work_orders/approve', {
+            const res = await axios.post('${API_URL}/work_orders/approve', {
                 session_id: sessionId
             });
             

@@ -6,7 +6,7 @@ import {
 } from 'recharts';
 
 // ================= 1. CONFIGURATION =================
-const API_URL = "http://pm-backend.s1.inference-analytics.my/"; //"http://localhost:8000/api";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
 const REFRESH_RATE = 5000; 
 
 // ================= 2. ISO SEVERITY COMPONENT =================
