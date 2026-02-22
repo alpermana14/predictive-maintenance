@@ -21,7 +21,7 @@ load_dotenv()
 
 TABLE_NAME = "conveyor"
 TARGETS = ["current", "temperature", "z_rms", "x_rms", "z_peak", "x_peak", "noise"]
-FREQ = "30T"
+FREQ = "30min"  #Change 30T to 30min
 LAG_STEPS = 48
 TEST_DAYS = 7
 FORECAST_HORIZON = 12
