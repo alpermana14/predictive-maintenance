@@ -1,0 +1,18 @@
+# --- Backend (Python) ---
+backend/venv/
+backend/__pycache__/
+backend/*.pyc
+backend/.env
+backend/maintenance_history_db/
+backend/maintenance_manual_db/
+
+# --- Frontend (React) ---
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.env
+frontend/.env.local
+
+# --- System ---
+.DS_Store
+Thumbs.db
