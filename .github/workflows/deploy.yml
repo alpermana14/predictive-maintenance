@@ -1,0 +1,70 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create backend deployment package
+        uses: a7ul/tar-action@v1.1.0
+        with:
+          command: c
+          cwd: "./backend"
+          files: |
+            .
+          outPath: deploy.tar
+
+      - name: Deploy Backend to CapRover
+        uses: caprover/deploy-from-github@v1.0.1
+        with:
+          server: '${{ secrets.CAPROVER_SERVER }}'
+          app: '${{ secrets.BACKEND_APP_NAME }}'
+          token: '${{ secrets.BACKEND_APP_TOKEN }}'
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@v3
+        with:
+          node-version: 22.x
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: ./frontend
+        run: npm run build
+
+      - name: Create frontend deployment package
+        uses: a7ul/tar-action@v1.1.0
+        with:
+          command: c
+          cwd: "./frontend"
+          files: |
+            dist/
+            Dockerfile
+            nginx.conf
+            captain-definition
+          outPath: deploy.tar
+
+      - name: Deploy Frontend to CapRover
+        uses: caprover/deploy-from-github@v1.0.1
+        with:
+          server: '${{ secrets.CAPROVER_SERVER }}'
+          app: '${{ secrets.FRONTEND_APP_NAME }}'
+          token: '${{ secrets.FRONTEND_APP_TOKEN }}'
