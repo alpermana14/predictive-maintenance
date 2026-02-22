@@ -94,6 +94,11 @@ def load_conveyor_data():
                 df[col] = pd.to_numeric(df[col], errors='coerce')
         # --------------------------------------------
 
+        # --- SCENARIO 2 FIX: DROP TEXT COLUMNS BEFORE MATH ---
+        # We must remove text before apply_imputation runs
+        cols_to_drop = ["conveyor_id", "category", "status"] 
+        df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+
         df = apply_imputation(df, TARGETS)
 
         # Clean columns
