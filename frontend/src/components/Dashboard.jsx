@@ -133,7 +133,7 @@ export default function Dashboard() {
 
     useEffect(() => {
         const fetchSummary = () => {
-            axios.get(`${API_URL}/summary`)
+            axios.get(`${API_URL}/api/summary`)
                 .then(res => setSummary(res.data))
                 .catch(err => console.error("Summary API Error:", err));
         };
@@ -146,9 +146,9 @@ export default function Dashboard() {
         const fetchCharts = async () => {
             try {
                 const [forecastRes, anomalyRes, importanceRes] = await Promise.all([
-                    axios.get(`${API_URL}/forecast/${selectedTarget}`),
-                    axios.get(`${API_URL}/anomalies/${selectedTarget}`),
-                    axios.get(`${API_URL}/importance`)
+                    axios.get(`${API_URL}/api/forecast/${selectedTarget}`),
+                    axios.get(`${API_URL}/api/anomalies/${selectedTarget}`),
+                    axios.get(`${API_URL}/api/importance`)
                 ]);
 
                 // --- LINE CHART (WITH ERROR FLAGS) ---
@@ -222,7 +222,7 @@ export default function Dashboard() {
         const fetchWorkOrders = async () => {
             try {
                 setWorkOrdersLoading(true);
-                const res = await axios.get(`${API_URL}/work_orders`);
+                const res = await axios.get(`${API_URL}/api/work_orders`);
                 setWorkOrders(res.data.items || []);
             } catch (err) {
                 console.error("Work Orders API Error:", err);

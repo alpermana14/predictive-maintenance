@@ -35,7 +35,7 @@ export default function Chatbot() {
         setLoading(true);
 
         try {
-            const res = await axios.post(`${API_URL}/chat`, {
+            const res = await axios.post(`${API_URL}/api/chat`, {
                 message: newMsg.content,
                 session_id: sessionId
             });
@@ -61,7 +61,7 @@ export default function Chatbot() {
         try {
             setLoading(true);
             // Call the new backend endpoint we discussed
-            const res = await axios.post(`${API_URL}/work_orders/approve`, {
+            const res = await axios.post(`${API_URL}/api/work_orders/approve`, {
                 session_id: sessionId
             });
             
