@@ -56,7 +56,10 @@ jobs:
           command: c
           cwd: "./frontend"
           files: |
-            .
+            dist/
+            Dockerfile
+            nginx.conf
+            captain-definition
           outPath: deploy.tar
 
       - name: Deploy Frontend to CapRover
