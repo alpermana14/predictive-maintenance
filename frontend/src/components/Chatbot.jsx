@@ -121,7 +121,7 @@ export default function Chatbot() {
         };
 
         try {
-            const res = await axios.post('${API_URL}/api/chat', payload);
+            const res = await axios.post(`${API_URL}/api/chat`, payload);
             console.log("[FRONTEND] Response received successfully!");
             const aiMsg = { role: 'ai', content: res.data.response };
             setMessages(prev => [...prev, aiMsg]);
@@ -144,7 +144,7 @@ export default function Chatbot() {
         try {
             setLoading(true);
             // Call the new backend endpoint we discussed
-            const res = await axios.post('${API_URL}/api/work_orders/approve', {
+            const res = await axios.post(`${API_URL}/api/work_orders/approve`, {
                 session_id: sessionId
             });
             
