@@ -97,7 +97,8 @@ export default function Chatbot() {
     };
 
     const sendMessage = async () => {
-        if (!input.trim()) return;
+        //if (!input.trim()) return;
+        if (!input.trim() && !imageBase64) return;
         
         const newMsg = { 
             role: 'user', 
