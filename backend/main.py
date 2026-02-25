@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from chat_engine import agent_executor, DRAFT_STORE, vectorstore_history
 from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv 
+from typing import Optional
 
 # Import logic from your ML Engine
 from ml_engine import run_pipeline, load_conveyor_data, TARGETS 
@@ -299,6 +300,7 @@ def get_work_order(work_id: str):
 class ChatRequest(BaseModel):
     message: str
     session_id: str
+    image_base64: Optional[str] = None # New field for the image
 
 #@app.post("/api/chat")
 @app.post("/api/chat")
@@ -370,19 +372,35 @@ def chat_endpoint(req: ChatRequest):
             "current_draft_text": existing_draft,
         }
 
-    # 2. Run the LangGraph Agent
+    # 2. Prepare the Message Content (Handling optional image)
+    # This structures the payload dynamically so LangChain / OpenAI know if an image is attached
+    #message_content = [{"type": "text", "text": req.message}]
+    message_content = []
+    if req.image_base64:
+        print("[DEBUG] Image attached to chat message.")
+
+        message_content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": req.image_base64,
+                "detail": "auto" # Forces the API to parse the image properly
+            } 
+        })
+        message_content.append({"type": "text", "text": req.message})
+
+    # 3. Run the LangGraph Agent
     # 'thread_id' is used by LangGraph to remember conversation history
     config = {"configurable": {"thread_id": req.session_id}}
 
     output = agent_executor.invoke(
         {
-            "messages": [HumanMessage(content=req.message)], 
+            "messages": [HumanMessage(content=message_content)],
             "machine_state": current_context
         },
         config=config
     )
 
-    # 3. Extract Response
+    # 4. Extract Response
     ai_response = output["messages"][-1].content
 
     # NEW: Remove markdown symbols for a "clean" look
