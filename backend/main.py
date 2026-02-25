@@ -379,14 +379,19 @@ def chat_endpoint(req: ChatRequest):
     if req.image_base64:
         print("[DEBUG] Image attached to chat message.")
 
-        message_content.append({
-            "type": "image_url",
-            "image_url": {
-                "url": req.image_base64,
-                "detail": "auto" # Forces the API to parse the image properly
-            } 
-        })
-        message_content.append({"type": "text", "text": req.message})
+        message_content = [
+            {"type": "text", "text": req.message},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": req.image_base64,
+                    "detail": "auto"
+                } 
+            }
+        ]
+    else:
+        # CRITICAL FIX: If there is no image, just pass the plain text string
+        message_content = req.message
 
     # 3. Run the LangGraph Agent
     # 'thread_id' is used by LangGraph to remember conversation history
