@@ -9,6 +9,7 @@ from chat_engine import agent_executor, DRAFT_STORE, vectorstore_history
 from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv 
 from typing import Optional
+from langchain_core.documents import Document
 
 # Import logic from your ML Engine
 from ml_engine import run_pipeline, load_conveyor_data, TARGETS 
