@@ -158,7 +158,9 @@ export default function Chatbot() {
 
         } catch (err) {
             console.error(err);
-            alert("Failed to approve work order. Please check the console.");
+            //alert("Failed to approve work order. Please check the console.");
+            const detail = err?.response?.data?.detail || err?.message || "Unknown error";
+            alert(`Failed to approve work order: ${detail}`);
         } finally {
             setLoading(false);
         }

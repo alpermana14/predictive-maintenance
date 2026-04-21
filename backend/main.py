@@ -433,33 +433,33 @@ def approve_work_order(req: ApprovalRequest):
     if not content:
         raise HTTPException(status_code=400, detail="No draft found for this session.")
 
-    # 1. Clean the content
-    content_clean = content.replace("*", "").strip()
+    try:
+        # 1. Clean the content
+        content_clean = content.replace("*", "").strip()
 
-    # 2. Create Canonical ID (One per day)
-    today_str = datetime.utcnow().strftime("%Y_%m_%d")
-    canonical_id = f"work_order_{today_str}"
+        # 2. Create Canonical ID (One per day)
+        today_str = datetime.utcnow().strftime("%Y_%m_%d")
+        canonical_id = f"work_order_{today_str}"
 
-    # 3. Check for duplicates (Optional: Logic to append instead of skip)
-    existing = vectorstore_history._collection.get(where={"id": canonical_id})
-    if existing and existing.get("documents"):
-         # For this demo, we append to the existing day's log
-         # In production, you might want distinct IDs like work_order_DATE_001
-         pass 
+        # 3. Save to Vector DB
+        doc = Document(
+            page_content=content_clean,
+            metadata={
+                "id": canonical_id,
+                "created_at": datetime.utcnow().isoformat(),
+                "session_id": req.session_id,
+                "status": "human_approved"  # Tag it!
+            },
+        )
+        vectorstore_history.add_documents([doc])
 
-    # 4. Save to Vector DB
-    doc = Document(
-        page_content=content_clean,
-        metadata={
-            "id": canonical_id,
-            "created_at": datetime.utcnow().isoformat(),
-            "session_id": req.session_id,
-            "status": "human_approved" # Tag it!
-        },
-    )
-    vectorstore_history.add_documents([doc])
+        # 4. Clear the Draft
+        DRAFT_STORE[req.session_id] = ""
 
-    # 5. Clear the Draft
-    DRAFT_STORE[req.session_id] = ""
-
-    return {"status": "success", "work_order_id": canonical_id}
+        return {"status": "success", "work_order_id": canonical_id}
+    except Exception as e:
+        print(f"[ERROR] Failed to approve work order for session {req.session_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save work order: {str(e)}"
+        )
