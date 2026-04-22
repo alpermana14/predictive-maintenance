@@ -66,7 +66,7 @@ def retriever_tool(query: str) -> str:
 
 @tool
 def query_past_orders(query: str) -> str:
-    """Search past maintenance records for similar issues."""
+    """Search past maintenance records as decision-support knowledge for similar issues."""
     docs = vectorstore_history.similarity_search(query, k=3)
     if not docs: return "No relevant past records found."
     return "\n".join([f"record: {d.page_content}" for d in docs])
@@ -191,6 +191,13 @@ def agent_node(state: AgentState):
     2. **General Machinery Queries:** If the user asks general engineering questions or uploads an image of unrelated equipment (e.g., a pump, CNC spindle, broken pipe, general tool):
        - Answer based on your broad industrial and engineering knowledge.
        - DO NOT append or reference the live conveyor's vibration or IDK data, as it is completely irrelevant to other machines.
+
+    # === [PAST WORK ORDER KNOWLEDGE PROTOCOL] ===
+    Past work orders are a decision-support knowledge base.
+    - For troubleshooting, recommendations, maintenance strategy, risk assessment, or "what should we do next" questions, call `query_past_orders` before giving final advice.
+    - Use retrieved records to justify decisions with practical precedent (what was done, what worked, what to avoid).
+    - If relevant history exists, explicitly synthesize it into a recommended decision path (priority, checks, and next actions).
+    - If no relevant history is found, state that clearly and continue with best-practice guidance.
 
     # !!! CRITICAL PROTOCOL FOR WORK ORDERS !!!
     # READ THIS CAREFULLY. DO NOT HALLUCINATE.
