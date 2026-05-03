@@ -303,6 +303,38 @@ class ChatRequest(BaseModel):
     session_id: str
     image_base64: Optional[str] = None # New field for the image
 
+def build_historical_summary(df: pd.DataFrame, targets: list) -> dict:
+    """
+    Builds a compact historical summary for the LLM context.
+    Covers last 2 days (96 x 30min steps) and last 7 days (336 steps).
+    """
+    now = df.index[-1]
+    two_days_ago = now - pd.Timedelta(days=2)
+    seven_days_ago = now - pd.Timedelta(days=7)
+
+    summary = {}
+
+    for period_label, cutoff in [("last_2_days", two_days_ago), ("last_7_days", seven_days_ago)]:
+        period_df = df[df.index >= cutoff][targets]
+        if period_df.empty:
+            summary[period_label] = "No data available"
+            continue
+
+        stats = {}
+        for tgt in targets:
+            col = period_df[tgt]
+            stats[tgt] = {
+                "min": round(float(col.min()), 3),
+                "max": round(float(col.max()), 3),
+                "mean": round(float(col.mean()), 3),
+                "std": round(float(col.std()), 3),
+                "latest": round(float(col.iloc[-1]), 3),
+            }
+        summary[period_label] = stats
+
+    # Also include anomaly timestamps for last 2 days if available
+    return summary
+
 #@app.post("/api/chat")
 @app.post("/api/chat")
 def chat_endpoint(req: ChatRequest):
@@ -351,7 +383,8 @@ def chat_endpoint(req: ChatRequest):
         elif z_rms < 4.5: iso_status = "Zone C (Unsatisfactory)"
         else: iso_status = "Zone D (Unacceptable)"
     
-    
+        historical_summary = build_historical_summary(state.data, TARGETS)
+
         current_context = {
             "last_update": str(latest.name),
             "data_quality_warning": data_quality_msg,
@@ -371,8 +404,9 @@ def chat_endpoint(req: ChatRequest):
                 else "Loading..."
             ),
             "current_draft_text": existing_draft,
+             "historical_summary": historical_summary,
         }
-
+        
     # 2. Prepare the Message Content (Handling optional image)
     # This structures the payload dynamically so LangChain / OpenAI know if an image is attached
     #message_content = [{"type": "text", "text": req.message}]
