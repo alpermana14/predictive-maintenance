@@ -105,6 +105,11 @@ def start_realtime_system():
 
 # --- Bentley iTwin IoT Endpoints ---
 
+@app.get("/api/itwin/debug")
+def itwin_debug():
+    """Returns the raw nodes, devices, and sensors from Bentley."""
+    return itwin_bridge.debug_bentley_api()
+
 @app.get("/api/itwin/status")
 def itwin_status():
     """Returns the current status of the Bentley iTwin IoT integration."""

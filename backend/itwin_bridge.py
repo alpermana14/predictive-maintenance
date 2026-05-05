@@ -657,6 +657,33 @@ def push_to_itwin(state) -> bool:
 
 # ===================== STATUS QUERY =====================
 
+def debug_bentley_api() -> dict:
+    """Debug endpoint to fetch existing nodes, devices, and sensors."""
+    if not _is_configured():
+        return {"error": "Not configured"}
+    headers = _auth_headers()
+    if not headers:
+        return {"error": "No token"}
+    
+    result = {}
+    try:
+        # Get Nodes
+        r1 = requests.get(f"https://api.bentley.com/sensor-data/integrations/nodes?iTwinId={ITWIN_ASSET_ID}", headers=headers)
+        result["nodes"] = r1.json() if r1.status_code == 200 else r1.text
+        
+        # Get Devices
+        r2 = requests.get(f"https://api.bentley.com/sensor-data/devices?iTwinId={ITWIN_ASSET_ID}", headers=headers)
+        result["devices"] = r2.json() if r2.status_code == 200 else r2.text
+        
+        # Get Sensors
+        r3 = requests.get(f"https://api.bentley.com/sensor-data/sensors?iTwinId={ITWIN_ASSET_ID}", headers=headers)
+        result["sensors"] = r3.json() if r3.status_code == 200 else r3.text
+        
+    except Exception as e:
+        result["error"] = str(e)
+        
+    return result
+
 def get_status() -> dict:
     """Return the current bridge status for the /api/itwin/status endpoint."""
     return {
