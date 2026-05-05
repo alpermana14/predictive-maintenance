@@ -58,14 +58,17 @@ _token_cache = {
     "expires_at": 0,  # Unix timestamp
 }
 
-# Discovered sensor IDs after registration (populated by setup_itwin_sensors)
+# Global cache for sensor IDs (mapped to the user's existing April 9th sensors)
 _sensor_ids = {
-    "vibration": None,
-    "temperature": None,
-    "current": None,
-    "noise": None,
-    "forecast": None,
-    "anomaly": None,
+    "temperature": "/api/D54C48/node/dynamic/DE1B55/device/7B7B3D/sensor",
+    "current": "/api/D54C48/node/dynamic/DE1B55/device/97A0C2/sensor",
+    "z_rms": "/api/07EF1F/node/dynamic/C17041/device/BD0D0F/sensor",
+    "x_rms": "/api/593C59/node/dynamic/FCE47E/device/1B92B8/sensor",
+    "x_peak": "/api/593C59/node/dynamic/FCE47E/device/24A4B1/sensor",
+    "noise": "/api/593C59/node/dynamic/FCE47E/device/E9117F/sensor",
+    "z_peak": "/api/593C59/node/dynamic/FCE47E/device/C27256/sensor",
+    "forecast": "",
+    "anomaly": ""
 }
 
 _last_push_status = {
@@ -182,276 +185,16 @@ def setup_itwin_sensors() -> bool:
     if not _is_configured():
         logger.info("iTwin integration is not configured — skipping sensor setup.")
         return False
-
-    headers = _auth_headers()
-    if not headers:
-        logger.error("Cannot setup sensors — failed to obtain access token.")
-        return False
-
-    # First, try to discover existing sensors
-    if _discover_existing_sensors(headers):
-        logger.info("Existing sensors discovered — skipping registration.")
-        _setup_complete = True
-        return True
-
-    # Register new device + sensors
-    logger.info("Registering device and sensors in iTwin IoT...")
-
-    payload = {
-        "integration": {
-            "changeState": "new",
-            "devices": [
-                {
-                    "changeState": "new",
-                    "refId": str(uuid.uuid4()),
-                    "props": {
-                        "INTEGRATION_ID": "IMPORT_DEVICE_SDE",
-                        "NAME": "Conveyor-Main",
-                    },
-                    "sensors": [
-                        # Sensor 1: Vibration (4 metrics)
-                        {
-                            "changeState": "new",
-                            "refId": str(uuid.uuid4()),
-                            "props": {
-                                "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
-                                "NAME": "Vibration-Sensor",
-                                "UNKNOWN_UNITS": {"0": "mm/s", "1": "mm/s", "2": "mm/s", "3": "mm/s"},
-                                "UNKNOWN_METRICS": {"0": "z_rms", "1": "x_rms", "2": "z_peak", "3": "x_peak"},
-                            },
-                        },
-                        # Sensor 2: Temperature
-                        {
-                            "changeState": "new",
-                            "refId": str(uuid.uuid4()),
-                            "props": {
-                                "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
-                                "NAME": "Temperature-Sensor",
-                                "UNKNOWN_UNITS": {"0": "degC"},
-                                "UNKNOWN_METRICS": {"0": "temperature"},
-                            },
-                        },
-                        # Sensor 3: Current
-                        {
-                            "changeState": "new",
-                            "refId": str(uuid.uuid4()),
-                            "props": {
-                                "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
-                                "NAME": "Current-Sensor",
-                                "UNKNOWN_UNITS": {"0": "A"},
-                                "UNKNOWN_METRICS": {"0": "current"},
-                            },
-                        },
-                        # Sensor 4: Noise
-                        {
-                            "changeState": "new",
-                            "refId": str(uuid.uuid4()),
-                            "props": {
-                                "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
-                                "NAME": "Noise-Sensor",
-                                "UNKNOWN_UNITS": {"0": "dB"},
-                                "UNKNOWN_METRICS": {"0": "noise"},
-                            },
-                        },
-                        # Sensor 5: Forecast (all targets combined)
-                        {
-                            "changeState": "new",
-                            "refId": str(uuid.uuid4()),
-                            "props": {
-                                "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
-                                "NAME": "Forecast-Sensor",
-                                "UNKNOWN_UNITS": {
-                                    "0": "A", "1": "degC", "2": "mm/s",
-                                    "3": "mm/s", "4": "mm/s", "5": "mm/s", "6": "dB",
-                                },
-                                "UNKNOWN_METRICS": {
-                                    "0": "current_forecast",
-                                    "1": "temperature_forecast",
-                                    "2": "z_rms_forecast",
-                                    "3": "x_rms_forecast",
-                                    "4": "z_peak_forecast",
-                                    "5": "x_peak_forecast",
-                                    "6": "noise_forecast",
-                                },
-                            },
-                        },
-                        # Sensor 6: Anomaly Scores
-                        {
-                            "changeState": "new",
-                            "refId": str(uuid.uuid4()),
-                            "props": {
-                                "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
-                                "NAME": "Anomaly-Sensor",
-                                "UNKNOWN_UNITS": {
-                                    "0": "score", "1": "score", "2": "score",
-                                    "3": "score", "4": "score", "5": "score", "6": "score",
-                                },
-                                "UNKNOWN_METRICS": {
-                                    "0": "current_anomaly",
-                                    "1": "temperature_anomaly",
-                                    "2": "z_rms_anomaly",
-                                    "3": "x_rms_anomaly",
-                                    "4": "z_peak_anomaly",
-                                    "5": "x_peak_anomaly",
-                                    "6": "noise_anomaly",
-                                },
-                            },
-                        },
-                    ],
-                }
-            ],
-        }
-    }
-
-    try:
-        url = f"{INTEGRATE_URL}?iTwinId={ITWIN_ASSET_ID}"
-        logger.info(f"POST {url}")
-        resp = requests.post(url, json=payload, headers=headers, timeout=60)
-
-        logger.info(f"Registration response status: {resp.status_code}")
-        logger.info(f"Registration response body: {resp.text[:1000]}")
-
-        if resp.status_code in (200, 201):
-            logger.info(f"Sensor registration successful ({resp.status_code})")
-            # Now discover the created sensor IDs
-            _discover_existing_sensors(headers)
-            _setup_complete = True
-            return True
-        else:
-            logger.error(f"Sensor registration failed ({resp.status_code}): {resp.text[:1000]}")
-            return False
-
-    except Exception as e:
-        logger.error(f"Sensor registration exception: {e}")
-        return False
+    
+    _setup_complete = True
+    return True
 
 
 def _discover_existing_sensors(headers: dict) -> bool:
-    """
-    Query the integration to find existing sensor IDs.
-    Populates the _sensor_ids dict with discovered paths.
-    Returns True if sensors were found.
-    """
-    try:
-        # Try to use the GET nodes endpoint to find existing integrations
-        url = f"https://api.bentley.com/sensor-data/integrations/nodes?iTwinId={ITWIN_ASSET_ID}"
-        resp = requests.get(
-            url,
-            headers=headers,
-            timeout=30,
-        )
-
-        logger.info(f"Discovery response status: {resp.status_code}")
-
-        if resp.status_code != 200:
-            logger.warning(f"Discovery query returned {resp.status_code}: {resp.text[:500]}")
-            return False
-
-        data = resp.json()
-        logger.info(f"Discovery response body: {str(data)[:1000]}")
-
-        # If data contains a list of nodes, we need to find our device and sensors
-        # Note: the exact structure depends on Bentley's GET nodes response. 
-        # We will iterate through all elements recursively to find "sensors" with our target names
-        
-        found_count = 0
-        
-        def _search_sensors(obj):
-            nonlocal found_count
-            if isinstance(obj, dict):
-                if "sensors" in obj and isinstance(obj["sensors"], list):
-                    for sensor in obj["sensors"]:
-                        sensor_name = sensor.get("props", {}).get("NAME", "")
-                        sensor_id = sensor.get("id", "")
-                        
-                        name_to_key = {
-                            "Vibration-Sensor": "vibration",
-                            "Temperature-Sensor": "temperature",
-                            "Current-Sensor": "current",
-                            "Noise-Sensor": "noise",
-                            "Forecast-Sensor": "forecast",
-                            "Anomaly-Sensor": "anomaly",
-                        }
-                        
-                        key = name_to_key.get(sensor_name)
-                        if key and sensor_id:
-                            _sensor_ids[key] = sensor_id
-                            found_count += 1
-                            logger.info(f"Discovered sensor: {sensor_name} → {sensor_id}")
-                
-                for k, v in obj.items():
-                    _search_sensors(v)
-            elif isinstance(obj, list):
-                for item in obj:
-                    _search_sensors(item)
-
-        _search_sensors(data)
-
-        # Parse the response to find sensor paths by name
-        # The response structure varies; we look for sensors with our known names
-        integration = data.get("integration", data)
-        devices = integration.get("devices", [])
-
-        found_count = 0
-        for device in devices:
-            device_name = device.get("props", {}).get("NAME", "")
-            if device_name != "Conveyor-Main":
-                continue
-
-            sensors = device.get("sensors", [])
-            for sensor in sensors:
-                sensor_name = sensor.get("props", {}).get("NAME", "")
-                sensor_id = sensor.get("id", "")
-
-                name_to_key = {
-                    "Vibration-Sensor": "vibration",
-                    "Temperature-Sensor": "temperature",
-                    "Current-Sensor": "current",
-                    "Noise-Sensor": "noise",
-                    "Forecast-Sensor": "forecast",
-                    "Anomaly-Sensor": "anomaly",
-                }
-
-                key = name_to_key.get(sensor_name)
-                if key and sensor_id:
-                    _sensor_ids[key] = sensor_id
-                    found_count += 1
-                    logger.info(f"Discovered sensor: {sensor_name} → {sensor_id}")
-
-        if found_count > 0:
-            logger.info(f"Discovered {found_count} existing sensors.")
-            
-            # Save to a local file cache for faster recovery
-            try:
-                import json
-                with open("itwin_sensor_ids.json", "w") as f:
-                    json.dump(_sensor_ids, f)
-            except Exception:
-                pass
-                
-            return True
-
-        # Also try to load from local cache if API didn't find them
-        try:
-            import json
-            if os.path.exists("itwin_sensor_ids.json"):
-                with open("itwin_sensor_ids.json", "r") as f:
-                    cached_ids = json.load(f)
-                    for k, v in cached_ids.items():
-                        if v:
-                            _sensor_ids[k] = v
-                            found_count += 1
-                if found_count > 0:
-                    logger.info(f"Loaded {found_count} existing sensors from local cache.")
-                    return True
-        except Exception:
-            pass
-
-        return False
-
-    except Exception as e:
-        logger.debug(f"Sensor discovery exception: {e}")
-        return False
+    # Since we are using hardcoded mappings for the existing sensors, we just return True.
+    # The dictionary is already populated at the top of the file.
+    logger.info("Using hardcoded sensor IDs from existing April 9th nodes.")
+    return True
 
 
 # ===================== DATA PUSH =====================
@@ -498,8 +241,8 @@ def push_to_itwin(state) -> bool:
         return False
 
     try:
-        observations = []
         latest = state.data.iloc[-1]
+        features = latest.to_dict()
         # Use the sensor data timestamp in UTC ISO format
         timestamp = latest.name
         if hasattr(timestamp, "isoformat"):
@@ -510,49 +253,56 @@ def push_to_itwin(state) -> bool:
         else:
             ts_str = str(timestamp)
 
-        # --- 1. Raw Sensor Readings ---
-
-        # Vibration sensor (4 metrics)
-        if _sensor_ids.get("vibration"):
-            observations.append({
-                "sensorId": _sensor_ids["vibration"],
-                "timestamp": ts_str,
-                "values": {
-                    "z_rms": _safe_float(latest.get("z_rms")),
-                    "x_rms": _safe_float(latest.get("x_rms")),
-                    "z_peak": _safe_float(latest.get("z_peak")),
-                    "x_peak": _safe_float(latest.get("x_peak")),
-                },
-            })
-
-        # Temperature sensor
+        observations = []
+        
+        # Build payload mapping exactly to the 7 existing sensors
         if _sensor_ids.get("temperature"):
             observations.append({
                 "sensorId": _sensor_ids["temperature"],
                 "timestamp": ts_str,
-                "values": {
-                    "temperature": _safe_float(latest.get("temperature")),
-                },
+                "values": [_safe_float(features.get("temperature", 0))]
             })
-
-        # Current sensor
+            
         if _sensor_ids.get("current"):
             observations.append({
                 "sensorId": _sensor_ids["current"],
                 "timestamp": ts_str,
-                "values": {
-                    "current": _safe_float(latest.get("current")),
-                },
+                "values": [_safe_float(features.get("current", 0))]
             })
-
-        # Noise sensor
+            
+        if _sensor_ids.get("z_rms"):
+            observations.append({
+                "sensorId": _sensor_ids["z_rms"],
+                "timestamp": ts_str,
+                "values": [_safe_float(features.get("z_rms", 0))]
+            })
+            
+        if _sensor_ids.get("x_rms"):
+            observations.append({
+                "sensorId": _sensor_ids["x_rms"],
+                "timestamp": ts_str,
+                "values": [_safe_float(features.get("x_rms", 0))]
+            })
+            
+        if _sensor_ids.get("x_peak"):
+            observations.append({
+                "sensorId": _sensor_ids["x_peak"],
+                "timestamp": ts_str,
+                "values": [_safe_float(features.get("x_peak", 0))]
+            })
+            
         if _sensor_ids.get("noise"):
             observations.append({
                 "sensorId": _sensor_ids["noise"],
                 "timestamp": ts_str,
-                "values": {
-                    "noise": _safe_float(latest.get("noise")),
-                },
+                "values": [_safe_float(features.get("noise", 0))]
+            })
+            
+        if _sensor_ids.get("z_peak"):
+            observations.append({
+                "sensorId": _sensor_ids["z_peak"],
+                "timestamp": ts_str,
+                "values": [_safe_float(features.get("z_peak", 0))]
             })
 
         # --- 2. Forecast Values ---
