@@ -14,6 +14,9 @@ from langchain_core.documents import Document
 # Import logic from your ML Engine
 from ml_engine import run_pipeline, load_conveyor_data, TARGETS 
 
+# Import Bentley iTwin IoT Bridge
+import itwin_bridge
+
 load_dotenv()
 
 app = FastAPI(title="Predictive Maintenance API")
@@ -66,6 +69,12 @@ def update_machine_state():
         
         state.last_update = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[INFO] Scheduler updated successfully. Last data point: {df.index[-1]}")
+
+        # Push latest data to Bentley iTwin IoT (if configured)
+        try:
+            itwin_bridge.push_to_itwin(state)
+        except Exception as itwin_err:
+            print(f"[WARN] iTwin push failed (non-critical): {itwin_err}")
         
     except Exception as e:
         print(f"[ERROR] Scheduler update failed: {str(e)}")
@@ -78,8 +87,14 @@ def start_realtime_system():
     # 1. Run immediately so the dashboard isn't empty when you open it
     update_machine_state()
     
-    # 2. Configure the Scheduler to run every 1 minute
-    # You can change 'minutes=1' to 'seconds=30' or 'hours=1'
+    # 2. Setup Bentley iTwin IoT sensors (one-time registration)
+    try:
+        itwin_bridge.setup_itwin_sensors()
+    except Exception as e:
+        print(f"[WARN] iTwin sensor setup failed (non-critical): {e}")
+    
+    # 3. Configure the Scheduler to run every 5 minutes
+    # You can change 'minutes=5' to 'seconds=30' or 'hours=1'
     scheduler = BackgroundScheduler()
     scheduler.add_job(update_machine_state, 'interval', minutes=5)
     scheduler.start()
@@ -87,6 +102,33 @@ def start_realtime_system():
     print("[INFO] Scheduler is active: Auto-refreshing every 5 minutes.")
 
 # ===================== 3. API ENDPOINTS =====================
+
+# --- Bentley iTwin IoT Endpoints ---
+
+@app.get("/api/itwin/status")
+def itwin_status():
+    """Returns the current status of the Bentley iTwin IoT integration."""
+    return itwin_bridge.get_status()
+
+@app.post("/api/itwin/push")
+def itwin_manual_push():
+    """Manually trigger a data push to Bentley iTwin IoT."""
+    if state.data is None:
+        raise HTTPException(status_code=503, detail="System initializing, no data to push.")
+    
+    success = itwin_bridge.push_to_itwin(state)
+    status_info = itwin_bridge.get_status()
+    
+    if success:
+        return {"status": "success", "detail": status_info["last_push"]}
+    else:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Push to iTwin IoT failed",
+                "info": status_info["last_push"]
+            }
+        )
 
 @app.get("/api/summary")
 def get_summary():
