@@ -297,7 +297,11 @@ def setup_itwin_sensors() -> bool:
 
     try:
         url = f"{INTEGRATE_URL}?iTwinId={ITWIN_ASSET_ID}"
+        logger.info(f"POST {url}")
         resp = requests.post(url, json=payload, headers=headers, timeout=60)
+
+        logger.info(f"Registration response status: {resp.status_code}")
+        logger.info(f"Registration response body: {resp.text[:1000]}")
 
         if resp.status_code in (200, 201):
             logger.info(f"Sensor registration successful ({resp.status_code})")
@@ -306,7 +310,7 @@ def setup_itwin_sensors() -> bool:
             _setup_complete = True
             return True
         else:
-            logger.error(f"Sensor registration failed ({resp.status_code}): {resp.text[:500]}")
+            logger.error(f"Sensor registration failed ({resp.status_code}): {resp.text[:1000]}")
             return False
 
     except Exception as e:
@@ -330,8 +334,11 @@ def _discover_existing_sensors(headers: dict) -> bool:
             timeout=30,
         )
 
+        logger.info(f"Discovery response status: {resp.status_code}")
+        logger.info(f"Discovery response body: {resp.text[:1000]}")
+
         if resp.status_code != 200:
-            logger.debug(f"Discovery query returned {resp.status_code}")
+            logger.warning(f"Discovery query returned {resp.status_code}: {resp.text[:500]}")
             return False
 
         data = resp.json()
@@ -401,8 +408,10 @@ def push_to_itwin(state) -> bool:
         return False
 
     if not _setup_complete:
-        logger.warning("Sensor setup not complete — skipping push.")
-        return False
+        logger.info("Sensor setup not complete — attempting setup before push...")
+        if not setup_itwin_sensors():
+            logger.warning("Sensor setup still not complete — skipping push.")
+            return False
 
     if state.data is None:
         logger.warning("No data available — skipping push.")
