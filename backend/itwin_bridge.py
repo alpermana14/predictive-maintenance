@@ -668,17 +668,35 @@ def debug_bentley_api() -> dict:
     result = {}
     try:
         # Get Nodes
-        r1 = requests.get(f"https://api.bentley.com/sensor-data/integrations/nodes?iTwinId={ITWIN_ASSET_ID}", headers=headers)
-        result["nodes"] = r1.json() if r1.status_code == 200 else r1.text
+        r1 = requests.get(f"https://api.bentley.com/sensor-data/integrations/nodes?iTwinId={ITWIN_ASSET_ID}", headers=headers, timeout=30)
         
-        # Get Devices
-        r2 = requests.get(f"https://api.bentley.com/sensor-data/devices?iTwinId={ITWIN_ASSET_ID}", headers=headers)
-        result["devices"] = r2.json() if r2.status_code == 200 else r2.text
+        if r1.status_code != 200:
+            return {"error": f"Failed to get nodes: {r1.text}"}
+            
+        nodes_data = r1.json()
+        result["nodes_list"] = nodes_data
+        result["detailed_nodes"] = {}
         
-        # Get Sensors
-        r3 = requests.get(f"https://api.bentley.com/sensor-data/sensors?iTwinId={ITWIN_ASSET_ID}", headers=headers)
-        result["sensors"] = r3.json() if r3.status_code == 200 else r3.text
-        
+        nodes = nodes_data.get("nodes", [])
+        for n in nodes:
+            node_id = n.get("id")
+            if not node_id:
+                continue
+                
+            # For each node, get its full integration tree
+            r2 = requests.post(
+                INTEGRATE_URL,
+                json={"integration": {"nodeId": node_id}},
+                headers=headers,
+                params={"iTwinId": ITWIN_ASSET_ID},
+                timeout=30
+            )
+            
+            if r2.status_code == 200:
+                result["detailed_nodes"][node_id] = r2.json()
+            else:
+                result["detailed_nodes"][node_id] = {"error": r2.text}
+                
     except Exception as e:
         result["error"] = str(e)
         
