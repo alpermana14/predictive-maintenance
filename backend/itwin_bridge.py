@@ -372,7 +372,7 @@ def push_to_itwin(state) -> bool:
             timeout=30,
         )
 
-        if resp.status_code in (200, 201, 204):
+        if resp.status_code in (200, 201, 202, 204):
             logger.info(
                 f"Push successful — {len(observations)} observations uploaded "
                 f"(status {resp.status_code})"
