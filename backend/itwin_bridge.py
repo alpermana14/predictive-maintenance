@@ -10,6 +10,7 @@ Gracefully degrades to a no-op when credentials are not configured.
 
 import os
 import time
+import uuid
 import logging
 import numpy as np
 import requests
@@ -202,6 +203,7 @@ def setup_itwin_sensors() -> bool:
             "devices": [
                 {
                     "changeState": "new",
+                    "refId": str(uuid.uuid4()),
                     "props": {
                         "INTEGRATION_ID": "IMPORT_DEVICE_SDE",
                         "NAME": "Conveyor-Main",
@@ -210,6 +212,7 @@ def setup_itwin_sensors() -> bool:
                         # Sensor 1: Vibration (4 metrics)
                         {
                             "changeState": "new",
+                            "refId": str(uuid.uuid4()),
                             "props": {
                                 "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
                                 "NAME": "Vibration-Sensor",
@@ -220,6 +223,7 @@ def setup_itwin_sensors() -> bool:
                         # Sensor 2: Temperature
                         {
                             "changeState": "new",
+                            "refId": str(uuid.uuid4()),
                             "props": {
                                 "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
                                 "NAME": "Temperature-Sensor",
@@ -230,6 +234,7 @@ def setup_itwin_sensors() -> bool:
                         # Sensor 3: Current
                         {
                             "changeState": "new",
+                            "refId": str(uuid.uuid4()),
                             "props": {
                                 "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
                                 "NAME": "Current-Sensor",
@@ -240,6 +245,7 @@ def setup_itwin_sensors() -> bool:
                         # Sensor 4: Noise
                         {
                             "changeState": "new",
+                            "refId": str(uuid.uuid4()),
                             "props": {
                                 "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
                                 "NAME": "Noise-Sensor",
@@ -250,6 +256,7 @@ def setup_itwin_sensors() -> bool:
                         # Sensor 5: Forecast (all targets combined)
                         {
                             "changeState": "new",
+                            "refId": str(uuid.uuid4()),
                             "props": {
                                 "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
                                 "NAME": "Forecast-Sensor",
@@ -271,6 +278,7 @@ def setup_itwin_sensors() -> bool:
                         # Sensor 6: Anomaly Scores
                         {
                             "changeState": "new",
+                            "refId": str(uuid.uuid4()),
                             "props": {
                                 "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
                                 "NAME": "Anomaly-Sensor",
@@ -325,23 +333,59 @@ def _discover_existing_sensors(headers: dict) -> bool:
     Returns True if sensors were found.
     """
     try:
-        # Use the GET integrations endpoint to find our node
-        resp = requests.post(
-            INTEGRATE_URL,
-            json={"integration": {}},
+        # Try to use the GET nodes endpoint to find existing integrations
+        url = f"https://api.bentley.com/sensor-data/integrations/nodes?iTwinId={ITWIN_ASSET_ID}"
+        resp = requests.get(
+            url,
             headers=headers,
-            params={"iTwinId": ITWIN_ASSET_ID},
             timeout=30,
         )
 
         logger.info(f"Discovery response status: {resp.status_code}")
-        logger.info(f"Discovery response body: {resp.text[:1000]}")
 
         if resp.status_code != 200:
             logger.warning(f"Discovery query returned {resp.status_code}: {resp.text[:500]}")
             return False
 
         data = resp.json()
+        logger.info(f"Discovery response body: {str(data)[:1000]}")
+
+        # If data contains a list of nodes, we need to find our device and sensors
+        # Note: the exact structure depends on Bentley's GET nodes response. 
+        # We will iterate through all elements recursively to find "sensors" with our target names
+        
+        found_count = 0
+        
+        def _search_sensors(obj):
+            nonlocal found_count
+            if isinstance(obj, dict):
+                if "sensors" in obj and isinstance(obj["sensors"], list):
+                    for sensor in obj["sensors"]:
+                        sensor_name = sensor.get("props", {}).get("NAME", "")
+                        sensor_id = sensor.get("id", "")
+                        
+                        name_to_key = {
+                            "Vibration-Sensor": "vibration",
+                            "Temperature-Sensor": "temperature",
+                            "Current-Sensor": "current",
+                            "Noise-Sensor": "noise",
+                            "Forecast-Sensor": "forecast",
+                            "Anomaly-Sensor": "anomaly",
+                        }
+                        
+                        key = name_to_key.get(sensor_name)
+                        if key and sensor_id:
+                            _sensor_ids[key] = sensor_id
+                            found_count += 1
+                            logger.info(f"Discovered sensor: {sensor_name} → {sensor_id}")
+                
+                for k, v in obj.items():
+                    _search_sensors(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _search_sensors(item)
+
+        _search_sensors(data)
 
         # Parse the response to find sensor paths by name
         # The response structure varies; we look for sensors with our known names
@@ -376,7 +420,32 @@ def _discover_existing_sensors(headers: dict) -> bool:
 
         if found_count > 0:
             logger.info(f"Discovered {found_count} existing sensors.")
+            
+            # Save to a local file cache for faster recovery
+            try:
+                import json
+                with open("itwin_sensor_ids.json", "w") as f:
+                    json.dump(_sensor_ids, f)
+            except Exception:
+                pass
+                
             return True
+
+        # Also try to load from local cache if API didn't find them
+        try:
+            import json
+            if os.path.exists("itwin_sensor_ids.json"):
+                with open("itwin_sensor_ids.json", "r") as f:
+                    cached_ids = json.load(f)
+                    for k, v in cached_ids.items():
+                        if v:
+                            _sensor_ids[k] = v
+                            found_count += 1
+                if found_count > 0:
+                    logger.info(f"Loaded {found_count} existing sensors from local cache.")
+                    return True
+        except Exception:
+            pass
 
         return False
 
