@@ -260,49 +260,49 @@ def push_to_itwin(state) -> bool:
             observations.append({
                 "sensorId": _sensor_ids["temperature"],
                 "timestamp": ts_str,
-                "values": [_safe_float(features.get("temperature", 0))]
+                "values": {"Temperature": _safe_float(features.get("temperature", 0))}
             })
             
         if _sensor_ids.get("current"):
             observations.append({
                 "sensorId": _sensor_ids["current"],
                 "timestamp": ts_str,
-                "values": [_safe_float(features.get("current", 0))]
+                "values": {"current": _safe_float(features.get("current", 0))}
             })
             
         if _sensor_ids.get("z_rms"):
             observations.append({
                 "sensorId": _sensor_ids["z_rms"],
                 "timestamp": ts_str,
-                "values": [_safe_float(features.get("z_rms", 0))]
+                "values": {"z_rms": _safe_float(features.get("z_rms", 0))}
             })
             
         if _sensor_ids.get("x_rms"):
             observations.append({
                 "sensorId": _sensor_ids["x_rms"],
                 "timestamp": ts_str,
-                "values": [_safe_float(features.get("x_rms", 0))]
+                "values": {"x_rms": _safe_float(features.get("x_rms", 0))}
             })
             
         if _sensor_ids.get("x_peak"):
             observations.append({
                 "sensorId": _sensor_ids["x_peak"],
                 "timestamp": ts_str,
-                "values": [_safe_float(features.get("x_peak", 0))]
+                "values": {"x_peak": _safe_float(features.get("x_peak", 0))}
             })
             
         if _sensor_ids.get("noise"):
             observations.append({
                 "sensorId": _sensor_ids["noise"],
                 "timestamp": ts_str,
-                "values": [_safe_float(features.get("noise", 0))]
+                "values": {"noise": _safe_float(features.get("noise", 0))}
             })
             
         if _sensor_ids.get("z_peak"):
             observations.append({
                 "sensorId": _sensor_ids["z_peak"],
                 "timestamp": ts_str,
-                "values": [_safe_float(features.get("z_peak", 0))]
+                "values": {"z_peak": _safe_float(features.get("z_peak", 0))}
             })
 
         # --- 2. Forecast Values ---
