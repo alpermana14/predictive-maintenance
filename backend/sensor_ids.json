@@ -1,0 +1,21 @@
+{
+  "registered": true,
+  "sensor_ids": {
+    "current": "/api/45D894/node/dynamic/22228E/device/A1587D/sensor",
+    "z_peak": "/api/45D894/node/dynamic/22228E/device/141EBC/sensor",
+    "z_rms": "/api/45D894/node/dynamic/22228E/device/0CC12A/sensor",
+    "x_peak": "/api/45D894/node/dynamic/22228E/device/478542/sensor",
+    "noise": "/api/45D894/node/dynamic/22228E/device/46B188/sensor",
+    "x_rms": "/api/45D894/node/dynamic/22228E/device/BD9D62/sensor",
+    "temperature": "/api/45D894/node/dynamic/22228E/device/B82A04/sensor"
+  },
+  "metric_names": {
+    "current": "current",
+    "z_peak": "z_peak",
+    "z_rms": "conv_z_rms",
+    "x_peak": "x_peak",
+    "noise": "noise",
+    "x_rms": "conv_x_rms",
+    "temperature": "temperature"
+  }
+}

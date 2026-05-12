@@ -9,12 +9,12 @@ Gracefully degrades to a no-op when credentials are not configured.
 """
 
 import os
+import json
 import time
-import uuid
 import logging
 import numpy as np
 import requests
-from datetime import datetime, timezone
+from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,18 +37,31 @@ TOKEN_URL = "https://ims.bentley.com/connect/token"
 INTEGRATE_URL = "https://api.bentley.com/sensor-data/integrations/integrate"
 UPLOAD_URL = "https://api.bentley.com/sensor-data/data/upload"
 
+SENSOR_IDS_FILE = os.path.join(os.path.dirname(__file__), "sensor_ids.json")
+
 # Sensor targets (must match ml_engine.py TARGETS)
 TARGETS = ["current", "temperature", "z_rms", "x_rms", "z_peak", "x_peak", "noise"]
 
-# Units mapping for each target
+# Units mapping for each target — full names required by Bentley API
 UNITS = {
-    "current": "A",
-    "temperature": "°C",
-    "z_rms": "mm/s",
-    "x_rms": "mm/s",
-    "z_peak": "mm/s",
-    "x_peak": "mm/s",
-    "noise": "dB",
+    "current": "ampere",
+    "temperature": "celsius",
+    "z_rms": "millimeter",
+    "x_rms": "millimeter",
+    "z_peak": "millimeter",
+    "x_peak": "millimeter",
+    "noise": "decibel",
+}
+
+# Metric key names as registered in Bentley UNKNOWN_METRICS (must match upload values keys)
+METRIC_NAMES = {
+    "current": "current",
+    "temperature": "temperature",
+    "z_rms": "conv_z_rms",
+    "x_rms": "conv_x_rms",
+    "z_peak": "z_peak",
+    "x_peak": "x_peak",
+    "noise": "noise",
 }
 
 # ===================== GLOBAL STATE =====================
@@ -58,18 +71,8 @@ _token_cache = {
     "expires_at": 0,  # Unix timestamp
 }
 
-# Global cache for sensor IDs (mapped to the user's existing April 9th sensors)
-_sensor_ids = {
-    "temperature": "/api/D54C48/node/dynamic/DE1B55/device/7B7B3D/sensor",
-    "current": "/api/D54C48/node/dynamic/DE1B55/device/97A0C2/sensor",
-    "z_rms": "/api/07EF1F/node/dynamic/C17041/device/BD0D0F/sensor",
-    "x_rms": "/api/593C59/node/dynamic/FCE47E/device/1B92B8/sensor",
-    "x_peak": "/api/593C59/node/dynamic/FCE47E/device/24A4B1/sensor",
-    "noise": "/api/593C59/node/dynamic/FCE47E/device/E9117F/sensor",
-    "z_peak": "/api/593C59/node/dynamic/FCE47E/device/C27256/sensor",
-    "forecast": "",
-    "anomaly": ""
-}
+# Sensor IDs — loaded from sensor_ids.json at module init
+_sensor_ids: dict = {}
 
 _last_push_status = {
     "timestamp": None,
@@ -79,6 +82,9 @@ _last_push_status = {
 }
 
 _setup_complete = False
+
+# Tracks the data timestamp of the last successfully pushed row (deduplication)
+_last_pushed_data_ts: str | None = None
 
 
 # ===================== HELPERS =====================
@@ -110,6 +116,52 @@ def _safe_float(val) -> float:
         return float(val)
     except (TypeError, ValueError):
         return 0.0
+
+
+# ===================== SENSOR ID FILE PERSISTENCE =====================
+
+def _load_sensor_ids_from_file() -> dict:
+    try:
+        with open(SENSOR_IDS_FILE, "r") as f:
+            data = json.load(f)
+        if data.get("registered") and isinstance(data.get("sensor_ids"), dict):
+            return data["sensor_ids"]
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+        logger.debug(f"Could not load sensor_ids.json: {e}")
+    return {}
+
+
+def _save_sensor_ids_to_file(ids: dict) -> None:
+    payload = {"registered": True, "sensor_ids": ids}
+    try:
+        with open(SENSOR_IDS_FILE, "w") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+        logger.info(f"Sensor IDs saved to {SENSOR_IDS_FILE}")
+    except OSError as e:
+        logger.error(f"Failed to save sensor IDs: {e}")
+
+
+def _parse_integrate_response(data: dict) -> dict:
+    """Extract NAME→sensorId mapping from integrate API response."""
+    ids: dict = {}
+    try:
+        for dev_block in data["integration"].get("devices", []):
+            for sensor in dev_block.get("sensors", []):
+                name = sensor.get("props", {}).get("NAME", "")
+                sensor_id = sensor.get("id", "")
+                if name and sensor_id:
+                    ids[name] = sensor_id
+    except (KeyError, TypeError) as e:
+        logger.error(f"Failed to parse integrate response: {e}")
+    return ids
+
+
+# Load persisted sensor IDs at import time — fast path, no API call needed.
+_sensor_ids = _load_sensor_ids_from_file()
+if _sensor_ids:
+    _setup_complete = True
+    logger.info(f"Loaded {len(_sensor_ids)} sensor IDs from file — setup complete.")
 
 
 # ===================== OAUTH TOKEN MANAGEMENT =====================
@@ -171,29 +223,82 @@ def _auth_headers() -> dict | None:
 
 def setup_itwin_sensors() -> bool:
     """
-    One-time setup: Register device and sensors in iTwin IoT.
-    
-    Creates:
-    - 1 Device: "Conveyor-Main"
-    - 6 Sensors: Vibration, Temperature, Current, Noise, Forecast, Anomaly
-    
-    After creation, queries the integration to discover sensor IDs.
-    Returns True if successful, False otherwise.
+    Ensure sensors are registered in Bentley iTwin IoT.
+
+    Fast path (normal): sensor_ids.json has registered=true → returns True immediately.
+    Slow path (first deploy): calls the integrate API once, parses + saves the response.
     """
-    global _setup_complete
+    global _setup_complete, _sensor_ids
 
     if not _is_configured():
         logger.info("iTwin integration is not configured — skipping sensor setup.")
         return False
-    
+
+    # Fast path: module-level init already loaded IDs from file
+    if _setup_complete and _sensor_ids:
+        return True
+
+    # Second attempt: file may have been written between import and this call
+    ids = _load_sensor_ids_from_file()
+    if ids:
+        _sensor_ids = ids
+        _setup_complete = True
+        return True
+
+    # API path: first-time registration
+    logger.info("No existing sensor IDs found — calling integrate API (one-time)...")
+    headers = _auth_headers()
+    if not headers:
+        logger.error("Cannot call integrate API — no access token.")
+        return False
+
+    payload = {
+        "integration": {
+            "changeState": "new",
+            "devices": [{
+                "changeState": "new",
+                "props": {"INTEGRATION_ID": "IMPORT_DEVICE_SDE", "NAME": "PM-Conveyor-Device"},
+                "sensors": [
+                    {
+                        "changeState": "new",
+                        "props": {
+                            "INTEGRATION_ID": "GENERIC_SENSOR_SDE",
+                            "NAME": name,
+                            "UNKNOWN_UNITS": {"0": UNITS[name]},
+                            "UNKNOWN_METRICS": {"0": METRIC_NAMES[name]},
+                        },
+                    }
+                    for name in TARGETS
+                ],
+            }],
+        }
+    }
+
+    try:
+        resp = requests.post(
+            INTEGRATE_URL,
+            json=payload,
+            headers=headers,
+            params={"iTwinId": ITWIN_ASSET_ID},
+            timeout=60,
+        )
+    except Exception as e:
+        logger.error(f"Integrate API request failed: {e}")
+        return False
+
+    if resp.status_code not in (200, 201):
+        logger.error(f"Integrate API returned {resp.status_code}: {resp.text[:500]}")
+        return False
+
+    ids = _parse_integrate_response(resp.json())
+    if not ids:
+        logger.error("Integrate API response contained no parseable sensor IDs.")
+        return False
+
+    _sensor_ids = ids
     _setup_complete = True
-    return True
-
-
-def _discover_existing_sensors(headers: dict) -> bool:
-    # Since we are using hardcoded mappings for the existing sensors, we just return True.
-    # The dictionary is already populated at the top of the file.
-    logger.info("Using hardcoded sensor IDs from existing April 9th nodes.")
+    _save_sensor_ids_to_file(ids)
+    logger.info(f"Sensor registration complete — {len(ids)} sensors saved.")
     return True
 
 
@@ -201,20 +306,14 @@ def _discover_existing_sensors(headers: dict) -> bool:
 
 def push_to_itwin(state) -> bool:
     """
-    Push latest data from the global MachineState to Bentley iTwin IoT.
-    
-    Sends:
-    1. Raw sensor readings (latest data point)
-    2. Forecast values (last predicted step for each target)
-    3. Anomaly scores (latest IDK score for each target)
-    
-    Args:
-        state: The MachineState object from main.py
-        
-    Returns:
-        True if push succeeded, False otherwise
+    Push the latest raw sensor readings to Bentley iTwin IoT via data/upload.
+
+    Skips the push if the data timestamp matches the last successful upload
+    (deduplication — scheduler runs every 5 min, sensor data updates every 30 min).
+
+    Returns True if push succeeded or was skipped (duplicate), False on error.
     """
-    global _last_push_status
+    global _last_push_status, _last_pushed_data_ts
 
     if not _is_configured():
         return False
@@ -228,6 +327,22 @@ def push_to_itwin(state) -> bool:
     if state.data is None:
         logger.warning("No data available — skipping push.")
         return False
+
+    # Deduplication: skip if this data timestamp was already uploaded.
+    # Use the same ISO format as ts_str so the comparison is reliable.
+    try:
+        _last_ts = state.data.index[-1]
+        if hasattr(_last_ts, "isoformat"):
+            _candidate_ts = _last_ts.isoformat()
+            if "+" not in _candidate_ts and "Z" not in _candidate_ts:
+                _candidate_ts += "Z"
+        else:
+            _candidate_ts = str(_last_ts)
+        if _candidate_ts == _last_pushed_data_ts:
+            logger.debug(f"Skipping push — data timestamp {_candidate_ts} already uploaded.")
+            return True
+    except Exception:
+        pass
 
     headers = _auth_headers()
     if not headers:
@@ -254,105 +369,18 @@ def push_to_itwin(state) -> bool:
             ts_str = str(timestamp)
 
         observations = []
-        
-        # Build payload mapping exactly to the 7 existing sensors
-        if _sensor_ids.get("temperature"):
-            observations.append({
-                "sensorId": _sensor_ids["temperature"],
-                "timestamp": ts_str,
-                "values": {"Temperature": _safe_float(features.get("temperature", 0))}
-            })
-            
-        if _sensor_ids.get("current"):
-            observations.append({
-                "sensorId": _sensor_ids["current"],
-                "timestamp": ts_str,
-                "values": {"current": _safe_float(features.get("current", 0))}
-            })
-            
-        if _sensor_ids.get("z_rms"):
-            observations.append({
-                "sensorId": _sensor_ids["z_rms"],
-                "timestamp": ts_str,
-                "values": {"z_rms": _safe_float(features.get("z_rms", 0))}
-            })
-            
-        if _sensor_ids.get("x_rms"):
-            observations.append({
-                "sensorId": _sensor_ids["x_rms"],
-                "timestamp": ts_str,
-                "values": {"x_rms": _safe_float(features.get("x_rms", 0))}
-            })
-            
-        if _sensor_ids.get("x_peak"):
-            observations.append({
-                "sensorId": _sensor_ids["x_peak"],
-                "timestamp": ts_str,
-                "values": {"x_peak": _safe_float(features.get("x_peak", 0))}
-            })
-            
-        if _sensor_ids.get("noise"):
-            observations.append({
-                "sensorId": _sensor_ids["noise"],
-                "timestamp": ts_str,
-                "values": {"noise": _safe_float(features.get("noise", 0))}
-            })
-            
-        if _sensor_ids.get("z_peak"):
-            observations.append({
-                "sensorId": _sensor_ids["z_peak"],
-                "timestamp": ts_str,
-                "values": {"z_peak": _safe_float(features.get("z_peak", 0))}
-            })
 
-        # --- 2. Forecast Values ---
-        if _sensor_ids.get("forecast") and state.forecast is not None:
-            forecast_values = {}
-            for tgt in TARGETS:
-                if tgt in state.forecast.columns:
-                    # Use the last forecasted value (furthest prediction)
-                    forecast_values[f"{tgt}_forecast"] = _safe_float(
-                        state.forecast[tgt].iloc[-1]
-                    )
-                elif tgt in state.forecast:
-                    # Handle if forecast is a dict of Series
-                    forecast_values[f"{tgt}_forecast"] = _safe_float(
-                        state.forecast[tgt].iloc[-1]
-                    )
-
-            if forecast_values:
-                # Use the forecast's own last timestamp
-                fc_ts = ts_str  # Default to current data timestamp
-                try:
-                    if hasattr(state.forecast, "index") and len(state.forecast.index) > 0:
-                        fc_timestamp = state.forecast.index[-1]
-                        if hasattr(fc_timestamp, "isoformat"):
-                            fc_ts = fc_timestamp.isoformat()
-                            if "+" not in fc_ts and "Z" not in fc_ts:
-                                fc_ts += "Z"
-                except Exception:
-                    pass
-
-                observations.append({
-                    "sensorId": _sensor_ids["forecast"],
-                    "timestamp": fc_ts,
-                    "values": forecast_values,
-                })
-
-        # --- 3. Anomaly Scores ---
-        if _sensor_ids.get("anomaly") and state.anomalies:
-            anomaly_values = {}
-            for tgt in TARGETS:
-                scores = state.anomalies.get(tgt)
-                if scores is not None and len(scores) > 0:
-                    anomaly_values[f"{tgt}_anomaly"] = _safe_float(scores[-1])
-
-            if anomaly_values:
-                observations.append({
-                    "sensorId": _sensor_ids["anomaly"],
-                    "timestamp": ts_str,
-                    "values": anomaly_values,
-                })
+        # Build one observation per sensor using the registered metric key name
+        for tgt in TARGETS:
+            sid = _sensor_ids.get(tgt)
+            if not sid:
+                continue
+            metric_key = METRIC_NAMES[tgt]
+            observations.append({
+                "sensorId": sid,
+                "timestamp": ts_str,
+                "values": {metric_key: _safe_float(features.get(tgt, 0))},
+            })
 
         # --- Upload to Bentley ---
         if not observations:
@@ -383,6 +411,7 @@ def push_to_itwin(state) -> bool:
                 "message": f"Uploaded {len(observations)} observations",
                 "observations_sent": len(observations),
             }
+            _last_pushed_data_ts = ts_str
             return True
         else:
             logger.error(f"Push failed ({resp.status_code}): {resp.text[:500]}")
@@ -461,6 +490,7 @@ def get_status() -> dict:
         "asset_id": ITWIN_ASSET_ID if ITWIN_ENABLED else None,
         "sensor_ids": {k: v for k, v in _sensor_ids.items()},
         "last_push": _last_push_status,
+        "last_pushed_data_ts": _last_pushed_data_ts,
         "token_valid": (
             _token_cache["access_token"] is not None
             and time.time() < _token_cache["expires_at"]
