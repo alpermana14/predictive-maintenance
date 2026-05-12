@@ -335,7 +335,7 @@ def push_to_itwin(state) -> bool:
         if hasattr(_last_ts, "isoformat"):
             _candidate_ts = _last_ts.isoformat()
             if "+" not in _candidate_ts and "Z" not in _candidate_ts:
-                _candidate_ts += "Z"
+                _candidate_ts += "+08:00"
         else:
             _candidate_ts = str(_last_ts)
         if _candidate_ts == _last_pushed_data_ts:
@@ -362,9 +362,10 @@ def push_to_itwin(state) -> bool:
         timestamp = latest.name
         if hasattr(timestamp, "isoformat"):
             ts_str = timestamp.isoformat()
-            # Ensure UTC format for Bentley
+            # Timestamps from MySQL are in MYT (UTC+8). Mark them correctly so
+            # Bentley stores the right UTC value instead of shifting 8 hours ahead.
             if "+" not in ts_str and "Z" not in ts_str:
-                ts_str += "Z"
+                ts_str += "+08:00"
         else:
             ts_str = str(timestamp)
 
