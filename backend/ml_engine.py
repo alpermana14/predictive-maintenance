@@ -181,12 +181,15 @@ def generate_forecast(models, df, X_cols):
 
         for col in base_cols:
             if col in buffer.columns:
+                # Reference = most recent value (lag1), used to centre the lags
+                # to match the level-invariant features the models trained on.
+                ref = float(buffer.iloc[-1][col])
                 for lag in range(1, LAG_STEPS + 1):
                     lag_col = f"{col}_lag{lag}"
                     if lag_col in X_cols:
-                         # Get value from buffer (lag steps back)
-                         # iloc[-1] is most recent, iloc[-lag] goes back
-                         input_row[lag_col] = buffer.iloc[-lag][col]
+                         # Deviation of the lagged value from the latest value.
+                         # iloc[-1] is most recent, iloc[-lag] goes back.
+                         input_row[lag_col] = float(buffer.iloc[-lag][col]) - ref
 
         # Create single-row DataFrame for prediction
         X_pred = pd.DataFrame([input_row]).reindex(columns=X_cols).fillna(0)
@@ -243,14 +246,28 @@ def run_pipeline(df):
     print("[INFO] Feature Engineering...")
     df_numeric = df[TARGETS].copy()
     data = make_lag_features(df_numeric, LAG_STEPS)
-    X = data.drop(columns=TARGETS)
-    # Predict the one-step change (current - lag1) rather than the absolute
-    # level. Deltas are far more stationary across operating-regime shifts,
-    # so the model doesn't fight the recent condition change.
+
+    # Target: predict the one-step change (current - lag1) rather than the
+    # absolute level. Deltas are far more stationary across operating-regime
+    # shifts. (Computed before the lag columns are centered below.)
     y = pd.DataFrame(
         {tgt: data[tgt] - data[f"{tgt}_lag1"] for tgt in TARGETS},
         index=data.index,
     )
+
+    # Make inputs LEVEL-INVARIANT: express each lag as its deviation from the
+    # most recent value (lag1), so the model sees only the recent *shape*, not
+    # the absolute level. Without this the trees still key off the absolute
+    # value and pull the multi-step forecast back toward the historical mean
+    # (the upward drift). Centred features keep the whole horizon near the
+    # current operating level. lag1 becomes all-zero, so it is dropped.
+    for col in TARGETS:
+        ref = data[f"{col}_lag1"].copy()
+        for k in range(1, LAG_STEPS + 1):
+            data[f"{col}_lag{k}"] = data[f"{col}_lag{k}"] - ref
+
+    drop_cols = TARGETS + [f"{col}_lag1" for col in TARGETS]
+    X = data.drop(columns=drop_cols)
 
     # Split (Simple 80/20 for retraining)
     split_idx = int(len(X) * 0.9) 
