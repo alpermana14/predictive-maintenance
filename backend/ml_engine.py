@@ -26,6 +26,12 @@ LAG_STEPS = 48
 TEST_DAYS = 7
 FORECAST_HORIZON = 12
 
+# Recency weighting: how many days back a training row's weight halves.
+# Recent operating-regime data counts more, so the forecast tracks the
+# current condition instead of the 6-month average.
+STEPS_PER_DAY = 48  # 30min frequency
+RECENCY_HALF_LIFE_DAYS = 30
+
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
     "port": int(os.getenv("DB_PORT", 3306)),
@@ -132,8 +138,15 @@ def train_models(X_train, y_train, X_val, y_val):
         "seed": 42,
     }
 
+    # Exponentially decaying weights: most recent training row = 1.0,
+    # halving every RECENCY_HALF_LIFE_DAYS going back in time.
+    n = len(X_train)
+    half_life_steps = RECENCY_HALF_LIFE_DAYS * STEPS_PER_DAY
+    age = np.arange(n - 1, -1, -1)  # row 0 is oldest, last row is newest (age 0)
+    sample_weight = 0.5 ** (age / half_life_steps)
+
     for tgt in TARGETS:
-        train_set = lgb.Dataset(X_train, y_train[tgt])
+        train_set = lgb.Dataset(X_train, y_train[tgt], weight=sample_weight)
         val_set = lgb.Dataset(X_val, y_val[tgt])
         
         model = lgb.train(
@@ -178,10 +191,14 @@ def generate_forecast(models, df, X_cols):
         # Create single-row DataFrame for prediction
         X_pred = pd.DataFrame([input_row]).reindex(columns=X_cols).fillna(0)
         
-        # Predict all targets for this step
+        # Models predict the one-step DELTA. Reconstruct the absolute value
+        # by adding the delta to the most recent value in the buffer. This
+        # keeps the forecast continuous with the last real reading instead of
+        # snapping toward the long-term mean.
         preds_step = {}
         for tgt in TARGETS:
-            val = float(models[tgt].predict(X_pred)[0])
+            delta = float(models[tgt].predict(X_pred)[0])
+            val = float(buffer.iloc[-1][tgt]) + delta
             preds_step[tgt] = val
             forecast_dict[tgt].append(val)
 
@@ -227,7 +244,13 @@ def run_pipeline(df):
     df_numeric = df[TARGETS].copy()
     data = make_lag_features(df_numeric, LAG_STEPS)
     X = data.drop(columns=TARGETS)
-    y = data[TARGETS]
+    # Predict the one-step change (current - lag1) rather than the absolute
+    # level. Deltas are far more stationary across operating-regime shifts,
+    # so the model doesn't fight the recent condition change.
+    y = pd.DataFrame(
+        {tgt: data[tgt] - data[f"{tgt}_lag1"] for tgt in TARGETS},
+        index=data.index,
+    )
 
     # Split (Simple 80/20 for retraining)
     split_idx = int(len(X) * 0.9) 
