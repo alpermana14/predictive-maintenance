@@ -5,6 +5,44 @@ const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
 // Demo deployment (VITE_APPROVAL_MODE=open, set in the deploy workflow): no approver token is asked for
 const OPEN_APPROVAL = import.meta.env.VITE_APPROVAL_MODE === "open";
 
+// Inline **bold** inside one line of an AI reply
+const renderInline = (text) =>
+    text.split(/\*\*(.+?)\*\*/g).map((part, i) => (i % 2 ? <strong key={i} className="font-semibold text-gray-900">{part}</strong> : part));
+
+// AI replies use a small Markdown subset (bold, "- " bullets, "1. " items); render it without a library
+const RichText = ({ text }) => {
+    const blocks = [];
+    for (const raw of String(text || "").split("\n")) {
+        const line = raw.trim();
+        const bullet = line.match(/^[-*•]\s+(.*)$/);
+        const numbered = line.match(/^\d+[.)]\s+(.*)$/);
+        const type = bullet ? "ul" : numbered ? "ol" : line ? "p" : "gap";
+        const last = blocks[blocks.length - 1];
+        if ((type === "ul" || type === "ol") && last?.type === type) last.items.push((bullet || numbered)[1]);
+        else if (type === "ul" || type === "ol") blocks.push({ type, items: [(bullet || numbered)[1]] });
+        else if (type === "p") blocks.push({ type, text: line.replace(/^#+\s*/, "") });
+    }
+    return (
+        <div className="space-y-2 leading-relaxed">
+            {blocks.map((b, i) =>
+                b.type === "ul" ? (
+                    <ul key={i} className="space-y-1">
+                        {b.items.map((it, j) => (
+                            <li key={j} className="flex gap-2"><span className="text-blue-500 mt-0.5">•</span><span>{renderInline(it)}</span></li>
+                        ))}
+                    </ul>
+                ) : b.type === "ol" ? (
+                    <ol key={i} className="list-decimal pl-5 space-y-1">
+                        {b.items.map((it, j) => <li key={j}>{renderInline(it)}</li>)}
+                    </ol>
+                ) : (
+                    <p key={i}>{renderInline(b.text)}</p>
+                )
+            )}
+        </div>
+    );
+};
+
 export default function Chatbot() {
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState([]);
@@ -274,7 +312,7 @@ return (
                                         <img src={m.image} alt="User uploaded" className="rounded-md max-w-full h-auto border border-blue-400"/>
                                     </div>
                                 )}
-                                {m.content}
+                                {m.role === 'user' ? <span className="whitespace-pre-wrap">{m.content}</span> : <RichText text={m.content} />}
                             </div>
                         </div>
                     ))}

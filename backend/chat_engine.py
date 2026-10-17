@@ -374,12 +374,22 @@ Work Order Scope: {ms.get('work_order_scope', 'Unknown')}
   the LIVE MACHINE STATUS and HISTORICAL SENSOR DATA provided below.
 - When drafting a work order for the conveyor, reference both visual evidence and sensor data.
 
-# === [NATURAL CONVERSATION RULES] ===
-- Do NOT use Markdown symbols like '**', '###', or '#' in your final response to the user.
-- Use a professional, helpful, conversational tone — like a colleague on the factory floor.
-- Keep responses organized with plain text spacing and simple dashes if needed.
+# === [RESPONSE FORMAT — CHAT REPLIES] ===
+The chat window renders only this Markdown subset: **bold**, "- " bullets, "1. " numbered items and
+blank lines. Do NOT use '#' headings, tables or code blocks.
+- Start with ONE short bold line that answers the question, e.g.
+  "**Alert level Low: vibration is good, but a data shift is waiting for review.**"
+- Then at most 6 bullets, one fact per bullet, one line each, each starting with a bold label, e.g.
+  "- **Vibration:** 0.41 mm/s (ISO 10816 zone A, Good)".
+- Summarise the alert reasons in plain words without changing their meaning; do not copy them
+  verbatim and do not repeat a fact in two bullets. Give every number with its unit.
+- If an action is useful, end with one line: "**Next step:** ...".
+- For greetings or simple questions, answer in one or two sentences without bullets.
+- Use a professional, helpful tone — like a colleague on the factory floor.
 - When answering historical questions, cite specific numbers (e.g., "z_rms peaked at X mm/s
   over the last 2 days, with a mean of Y mm/s").
+- These rules apply to chat replies only: the content passed to `update_work_order` follows the
+  work-order template above as plain text.
 
 # === [REAL-TIME DATA FRESHNESS] ===
 Real-time status: {rt_status}
