@@ -20,17 +20,81 @@ except ImportError:
 load_dotenv()
 
 TABLE_NAME = "conveyor"
-TARGETS = ["current", "temperature", "z_rms", "x_rms", "z_peak", "x_peak", "noise"]
+# Motor current is not monitored: the fitted Rogowski-coil sensor (1000 A range)
+# cannot measure the 1-2 A drawn by the 450 W conveyor motor.
+# z_peak / x_peak are peak acceleration in g (not velocity).
+TARGETS = ["temperature", "z_rms", "x_rms", "z_peak", "x_peak", "noise"]
+UNITS = {"temperature": "°C", "z_rms": "mm/s", "x_rms": "mm/s",
+         "z_peak": "g", "x_peak": "g", "noise": "dB"}
 FREQ = "30min"  #Change 30T to 30min
 LAG_STEPS = 48
 TEST_DAYS = 7
 FORECAST_HORIZON = 12
 
-# Recency weighting: how many days back a training row's weight halves.
-# Recent operating-regime data counts more, so the forecast tracks the
-# current condition instead of the 6-month average.
-STEPS_PER_DAY = 48  # 30min frequency
-RECENCY_HALF_LIFE_DAYS = 30
+# s-IDK^2 settings (Section 4.3 of the paper; CAEE decision D16): psi = 2 is the smallest
+# value of the search space in [24], omega = 20 windows = one 10-hour operating cycle, and
+# the scored population is the last 144 points (3 days at 30-minute resolution).
+IDK_PSI = 2
+IDK_WIDTH = 20
+IDK_T = 100
+IDK_POPULATION = 144
+
+# ---------------------------------------------------------------------------
+# LightGBM configuration.
+#
+# "tuned" is the equal-budget Optuna configuration reported in Table 2 of the
+# paper and is the default, so the running system uses the hyperparameters the
+# paper reports (CAEE revision, 14 Sep 2026). "deployed" is the earlier generic
+# setting (learning rate 0.05, up to 500 rounds with early stopping), kept only
+# so that older timing runs (E10) can be reproduced.
+#
+# Only the hyperparameters change. Feature construction is identical: lag
+# features of all channels (Eq. 8) and one-step-ahead absolute targets (Eq. 9).
+#
+#   PM_LGB_CONFIG=tuned      (default, Table 2)
+#   PM_LGB_CONFIG=deployed   (earlier generic setting)
+# ---------------------------------------------------------------------------
+LGB_CONFIG = os.environ.get("PM_LGB_CONFIG", "tuned").lower()
+
+_LGB_DEPLOYED = {
+    "params": {
+        "objective": "regression",
+        "metric": "rmse",
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "verbosity": -1,
+        "seed": 42,
+    },
+    "num_boost_round": 500,
+    "early_stopping_rounds": 20,
+}
+
+# Table 2 values of the CAEE revision (six measured channels, 15 Optuna TPE trials,
+# validation 6-13 July 2026; experiments/e01b_forecasting_modelcomp.py). n_estimators
+# becomes num_boost_round and early stopping is disabled, so all 158 rounds run.
+# Note: LightGBM applies "subsample" only when bagging_freq > 0, which is not set here
+# (nor in the tuning run), so bagging is inactive in both.
+_LGB_TUNED = {
+    "params": {
+        "objective": "regression",
+        "metric": "rmse",
+        "learning_rate": 0.028181,
+        "num_leaves": 209,
+        "min_child_samples": 70,
+        "subsample": 0.776061,
+        "colsample_bytree": 0.648815,
+        "reg_lambda": 0.095655,
+        "verbosity": -1,
+        "seed": 42,
+    },
+    "num_boost_round": 158,
+    "early_stopping_rounds": None,
+}
+
+_LGB_SETTINGS = {"deployed": _LGB_DEPLOYED, "tuned": _LGB_TUNED}
+if LGB_CONFIG not in _LGB_SETTINGS:
+    raise ValueError(
+        f"PM_LGB_CONFIG must be 'deployed' or 'tuned', got {LGB_CONFIG!r}")
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -126,115 +190,77 @@ def make_lag_features(df, lag_steps):
         X = pd.concat([X, df.shift(lag).add_suffix(f"_lag{lag}")], axis=1)
     return X.dropna()
 
-# ===================== MODEL TRAINING =====================
-def train_models(X_train, y_train, X_val, y_val):
-    models = {}
-    params = {
-        "objective": "regression",
-        "metric": "rmse",
-        "learning_rate": 0.05,
-        "num_leaves": 31,
-        "verbosity": -1,
-        "seed": 42,
-    }
 
-    # Exponentially decaying weights: most recent training row = 1.0,
-    # halving every RECENCY_HALF_LIFE_DAYS going back in time.
-    n = len(X_train)
-    half_life_steps = RECENCY_HALF_LIFE_DAYS * STEPS_PER_DAY
-    age = np.arange(n - 1, -1, -1)  # row 0 is oldest, last row is newest (age 0)
-    sample_weight = 0.5 ** (age / half_life_steps)
+def build_supervised(df):
+    """Lag features of all channels (Eq. 8) and one-step-ahead absolute targets (Eq. 9).
+
+    Row t holds lags 1..LAG_STEPS of every channel as inputs and the value of each
+    channel at t as its target. Multi-step forecasts are produced recursively.
+    """
+    data = make_lag_features(df[TARGETS].copy(), LAG_STEPS)
+    return data.drop(columns=TARGETS), data[TARGETS]
+
+# ===================== MODEL TRAINING =====================
+def train_models(X_train, y_train, X_val=None, y_val=None):
+    """One LightGBM model per channel. Early stopping is used only when the
+    configuration defines it and a validation split is given."""
+    models = {}
+    setting = _LGB_SETTINGS[LGB_CONFIG]
+    params = dict(setting["params"])
+    n_rounds = setting["num_boost_round"]
+    stop_rounds = setting["early_stopping_rounds"]
+    use_val = bool(stop_rounds) and X_val is not None and len(X_val) > 0
 
     for tgt in TARGETS:
-        train_set = lgb.Dataset(X_train, y_train[tgt], weight=sample_weight)
-        val_set = lgb.Dataset(X_val, y_val[tgt])
-        
-        model = lgb.train(
-            params,
-            train_set,
-            valid_sets=[val_set],
-            num_boost_round=500,
-            callbacks=[lgb.early_stopping(20)]
-        )
-        models[tgt] = model
-    
+        train_set = lgb.Dataset(X_train, y_train[tgt])
+        kwargs = {}
+        if use_val:
+            kwargs = {"valid_sets": [lgb.Dataset(X_val, y_val[tgt])],
+                      "callbacks": [lgb.early_stopping(stop_rounds, verbose=False)]}
+        models[tgt] = lgb.train(params, train_set, num_boost_round=n_rounds, **kwargs)
+
     return models
 
 # ===================== FORECASTING LOGIC =====================
 def generate_forecast(models, df, X_cols):
-    """Recursive forecasting loop."""
-    buffer = df.iloc[-LAG_STEPS:].copy()
+    """Recursive 12-step forecast: each predicted step becomes lag 1 of the next."""
+    buffer = df[TARGETS].iloc[-LAG_STEPS:].reset_index(drop=True)
     future_index = pd.date_range(
         start=df.index[-1] + pd.Timedelta(FREQ),
-        periods=FORECAST_HORIZON, 
+        periods=FORECAST_HORIZON,
         freq=FREQ
     )
-    
+
     forecast_dict = {tgt: [] for tgt in TARGETS}
-
-    for step in range(FORECAST_HORIZON):
-        input_row = {}
-        # Reconstruct lag features from buffer
-        # Note: X_cols contains names like 'current_lag1', 'temperature_lag2'
-        base_cols = [c.split("_lag")[0] for c in X_cols if "_lag" in c]
-        base_cols = list(set(base_cols)) # unique
-
-        for col in base_cols:
-            if col in buffer.columns:
-                # Reference = most recent value (lag1), used to centre the lags
-                # to match the level-invariant features the models trained on.
-                ref = float(buffer.iloc[-1][col])
-                for lag in range(1, LAG_STEPS + 1):
-                    lag_col = f"{col}_lag{lag}"
-                    if lag_col in X_cols:
-                         # Deviation of the lagged value from the latest value.
-                         # iloc[-1] is most recent, iloc[-lag] goes back.
-                         input_row[lag_col] = float(buffer.iloc[-lag][col]) - ref
-
-        # Create single-row DataFrame for prediction
-        X_pred = pd.DataFrame([input_row]).reindex(columns=X_cols).fillna(0)
-        
-        # Models predict the one-step DELTA. Reconstruct the absolute value
-        # by adding the delta to the most recent value in the buffer. This
-        # keeps the forecast continuous with the last real reading instead of
-        # snapping toward the long-term mean.
-        preds_step = {}
+    for _ in range(FORECAST_HORIZON):
+        # iloc[-1] is the most recent value (lag 1), iloc[-lag] goes back in time.
+        row = {f"{col}_lag{lag}": float(buffer.iloc[-lag][col])
+               for col in TARGETS for lag in range(1, LAG_STEPS + 1)}
+        X_pred = pd.DataFrame([row]).reindex(columns=X_cols)
+        preds_step = {tgt: float(models[tgt].predict(X_pred)[0]) for tgt in TARGETS}
         for tgt in TARGETS:
-            delta = float(models[tgt].predict(X_pred)[0])
-            val = float(buffer.iloc[-1][tgt]) + delta
-            preds_step[tgt] = val
-            forecast_dict[tgt].append(val)
+            forecast_dict[tgt].append(preds_step[tgt])
+        buffer = pd.concat([buffer, pd.DataFrame([preds_step])], ignore_index=True).iloc[-LAG_STEPS:]
 
-        # Update buffer with predicted values for next recursion
-        new_row = buffer.iloc[-1].copy()
-        for tgt in TARGETS:
-            new_row[tgt] = preds_step[tgt]
-        
-        buffer = pd.concat([buffer, new_row.to_frame().T])
-        buffer = buffer.iloc[-LAG_STEPS:] # Keep buffer size constant
-
-    # Convert to DataFrame
-    forecast_df = pd.DataFrame(forecast_dict, index=future_index)
-    return forecast_df
+    return pd.DataFrame(forecast_dict, index=future_index)
 
 # ===================== ANOMALY DETECTION (IDK) =====================
 def detect_anomalies(df):
     """Runs IDK sliding window on all targets."""
     idk_scores = {}
-    N = 144  # Lookback window (approx 30 days of 30min data)
-    
+
     for sig in TARGETS:
-        # Prepare data shape for IDK
+        # Prepare data shape for IDK: the last IDK_POPULATION points (3 days)
         X = np.array(df[sig]).reshape(-1, 1)
-        X = X[-min(len(X), N):]
-        
-        # Run IDK
+        X = X[-min(len(X), IDK_POPULATION):]
+
+        # Run IDK; one similarity score per window, aligned to the window end
         scores = IDK_square_sliding(
             X,
-            t=100,
-            psi1=4,
-            width=20,
-            psi2=4
+            t=IDK_T,
+            psi1=IDK_PSI,
+            width=IDK_WIDTH,
+            psi2=IDK_PSI
         )
         idk_scores[sig] = scores.flatten()
         
@@ -244,38 +270,17 @@ def detect_anomalies(df):
 def run_pipeline(df):
     """Orchestrator function called by main.py."""
     print("[INFO] Feature Engineering...")
-    df_numeric = df[TARGETS].copy()
-    data = make_lag_features(df_numeric, LAG_STEPS)
-
-    # Target: predict the one-step change (current - lag1) rather than the
-    # absolute level. Deltas are far more stationary across operating-regime
-    # shifts. (Computed before the lag columns are centered below.)
-    y = pd.DataFrame(
-        {tgt: data[tgt] - data[f"{tgt}_lag1"] for tgt in TARGETS},
-        index=data.index,
-    )
-
-    # Make inputs LEVEL-INVARIANT: express each lag as its deviation from the
-    # most recent value (lag1), so the model sees only the recent *shape*, not
-    # the absolute level. Without this the trees still key off the absolute
-    # value and pull the multi-step forecast back toward the historical mean
-    # (the upward drift). Centred features keep the whole horizon near the
-    # current operating level. lag1 becomes all-zero, so it is dropped.
-    for col in TARGETS:
-        ref = data[f"{col}_lag1"].copy()
-        for k in range(1, LAG_STEPS + 1):
-            data[f"{col}_lag{k}"] = data[f"{col}_lag{k}"] - ref
-
-    drop_cols = TARGETS + [f"{col}_lag1" for col in TARGETS]
-    X = data.drop(columns=drop_cols)
-
-    # Split (Simple 80/20 for retraining)
-    split_idx = int(len(X) * 0.9) 
-    X_train, X_val = X.iloc[:split_idx], X.iloc[split_idx:]
-    y_train, y_val = y.iloc[:split_idx], y.iloc[split_idx:]
+    X, y = build_supervised(df)
 
     print("[INFO] Training Models...")
-    models = train_models(X_train, y_train, X_val, y_val)
+    if _LGB_SETTINGS[LGB_CONFIG]["early_stopping_rounds"]:
+        # Early stopping on the most recent 10% of rows.
+        split_idx = int(len(X) * 0.9)
+        models = train_models(X.iloc[:split_idx], y.iloc[:split_idx],
+                              X.iloc[split_idx:], y.iloc[split_idx:])
+    else:
+        # Fixed number of boosting rounds: use every available row.
+        models = train_models(X, y)
 
     print("[INFO] Generating Forecast...")
     forecast_df = generate_forecast(models, df, X.columns)

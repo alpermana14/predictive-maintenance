@@ -50,6 +50,7 @@ jobs:
         working-directory: ./frontend
         env:
           VITE_API_URL: https://pm-backend.s1.inference-analytics.my
+          VITE_APPROVAL_MODE: open
         run: npm run build
 
       - name: Create frontend deployment package

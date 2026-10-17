@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:local": "vite --mode localdev",
     "build": "vite build",
+    "build:local": "vite build --mode localdev --outDir dist-local",
+    "preview:local": "vite preview --outDir dist-local",
     "lint": "eslint .",
     "preview": "vite preview"
   },

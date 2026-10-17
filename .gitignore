@@ -3,8 +3,13 @@ backend/venv/
 backend/__pycache__/
 backend/*.pyc
 backend/.env
+backend/audit_log.jsonl
 backend/maintenance_history_db/
 backend/maintenance_manual_db/
+
+__pycache__/
+*.pyc
+.env
 
 # --- Frontend (React) ---
 frontend/node_modules/

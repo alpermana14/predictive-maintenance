@@ -2,13 +2,17 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
+// Demo deployment (VITE_APPROVAL_MODE=open, set in the deploy workflow): no approver token is asked for
+const OPEN_APPROVAL = import.meta.env.VITE_APPROVAL_MODE === "open";
 
 export default function Chatbot() {
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState("");
-    const [draft, setDraft] = useState(""); // Stores the active WO draft text
+    const [draft, setDraft] = useState(""); // Stores the active WO draft text (editable by the operator)
     const [loading, setLoading] = useState(false);
+    // Approver token issued by the administrator (APPROVER_TOKENS in backend/.env); kept for this browser tab only
+    const [approverToken, setApproverToken] = useState(() => sessionStorage.getItem("approverToken") || "");
 
     // Track session ID to maintain conversation context with the AI
     const [sessionId, setSessionId] = useState(
@@ -140,27 +144,68 @@ export default function Chatbot() {
         }
     };
 
-    // --- 2. NEW: HANDLE APPROVAL ---
+    // --- 2. HANDLE APPROVAL / REJECTION (named approver, audit-logged by the backend) ---
+    const getApproverToken = () => {
+        if (OPEN_APPROVAL) return "open";
+        let token = approverToken;
+        if (!token) {
+            token = (window.prompt("Enter your approver token:") || "").trim();
+            if (!token) return null;
+            sessionStorage.setItem("approverToken", token);
+            setApproverToken(token);
+        }
+        return token;
+    };
+
+    const reportApprovalError = (err, action) => {
+        console.error(err);
+        if (err?.response?.status === 401) {
+            sessionStorage.removeItem("approverToken");
+            setApproverToken("");
+        }
+        const detail = err?.response?.data?.detail || err?.message || "Unknown error";
+        alert(`Failed to ${action} work order: ${detail}`);
+    };
+
     const handleApprove = async () => {
+        const token = getApproverToken();
+        if (!token) return;
         try {
             setLoading(true);
-            // Call the new backend endpoint we discussed
-            const res = await axios.post(`${API_URL}/api/work_orders/approve`, {
-                session_id: sessionId
-            });
-            
-            // On success:
+            // The operator may have edited the draft; the edited text is what gets saved
+            const res = await axios.post(
+                `${API_URL}/api/work_orders/approve`,
+                { session_id: sessionId, content: draft },
+                { headers: { "X-Approver-Token": token } }
+            );
             setDraft(""); // Hide the yellow box
-            setMessages(prev => [...prev, { 
-                role: 'ai', 
-                content: `✅ Success! Work Order ${res.data.work_order_id} has been saved to the database.` 
+            setMessages(prev => [...prev, {
+                role: 'ai',
+                content: `✅ Work Order ${res.data.work_order_id} has been saved${res.data.modified ? " (with your edits)" : ""}.`
             }]);
-
         } catch (err) {
-            console.error(err);
-            //alert("Failed to approve work order. Please check the console.");
-            const detail = err?.response?.data?.detail || err?.message || "Unknown error";
-            alert(`Failed to approve work order: ${detail}`);
+            reportApprovalError(err, "approve");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleReject = async () => {
+        const reason = (window.prompt("Reason for rejecting this draft:") || "").trim();
+        if (!reason) return;
+        const token = getApproverToken();
+        if (!token) return;
+        try {
+            setLoading(true);
+            await axios.post(
+                `${API_URL}/api/work_orders/reject`,
+                { session_id: sessionId, reason },
+                { headers: { "X-Approver-Token": token } }
+            );
+            setDraft("");
+            setMessages(prev => [...prev, { role: 'ai', content: "❌ Draft rejected. Nothing was saved to the work order history." }]);
+        } catch (err) {
+            reportApprovalError(err, "reject");
         } finally {
             setLoading(false);
         }
@@ -181,13 +226,14 @@ return (
                 </div>
                 <textarea 
                     className="w-full text-xs p-2 border border-yellow-300 rounded bg-white h-32 resize-none focus:outline-none text-gray-700"
-                    value={draft} readOnly placeholder="AI will generate draft here..."
+                    value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="AI will generate draft here..."
                 />
                 <div className="flex gap-2 mt-1">
                     <button onClick={handleApprove} disabled={loading} className="flex-1 bg-green-600 hover:bg-green-700 text-white text-xs font-bold py-2 rounded shadow-sm transition-colors disabled:opacity-50">
                         {loading ? "Saving..." : "✓ Approve & Save"}
                     </button>
-                    <button onClick={() => setDraft("")} disabled={loading} className="px-3 bg-gray-200 hover:bg-gray-300 text-gray-700 text-xs font-bold rounded transition-colors border border-gray-300">✕ Close</button>
+                    <button onClick={handleReject} disabled={loading} className="px-3 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded shadow-sm transition-colors disabled:opacity-50">✕ Reject</button>
+                    <button onClick={() => setDraft("")} disabled={loading} className="px-3 bg-gray-200 hover:bg-gray-300 text-gray-700 text-xs font-bold rounded transition-colors border border-gray-300" title="Hide the draft without approving or rejecting it">Hide</button>
                 </div>
             </div>
         )}

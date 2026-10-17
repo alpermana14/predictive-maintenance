@@ -7,7 +7,11 @@ import {
 
 // ================= 1. CONFIGURATION =================
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
-const REFRESH_RATE = 5000; 
+const REFRESH_RATE = 5000;
+// Demo deployment (VITE_APPROVAL_MODE=open, set in the deploy workflow): no approver token is asked for
+const OPEN_APPROVAL = import.meta.env.VITE_APPROVAL_MODE === "open";
+// ?noanim in the URL turns chart animations off (used for static screenshots of the dashboard)
+const ANIMATE = !new URLSearchParams(window.location.search).has("noanim");
 
 // ================= 2. ISO SEVERITY COMPONENT =================
 const IsoSeverityChart = ({ zRms, xRms }) => {
@@ -66,7 +70,7 @@ const IsoSeverityChart = ({ zRms, xRms }) => {
     return (
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-6">
             <h2 className="text-center text-lg font-semibold text-gray-700 mb-6">
-                Vibration Severity according to ISO 10816-3
+                Vibration Severity according to ISO 10816-1 (Class I)
             </h2>
             <div className="h-[120px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
@@ -101,7 +105,7 @@ const IsoSeverityChart = ({ zRms, xRms }) => {
                                 { x: xRms, y: 0.5, name: 'X-RMS', dy: 25, color: '#374151' }   // Gray dot, label down
                             ]} 
                             shape={<CustomDot />} 
-                            isAnimationActive={true}
+                            isAnimationActive={ANIMATE}
                         />
                     </ScatterChart>
                 </ResponsiveContainer>
@@ -211,8 +215,33 @@ export default function Dashboard() {
 
     }, [selectedTarget]);
 
+    const [reviewing, setReviewing] = useState(false);
+
+    // Named approver marks the open distribution-shift episode as reviewed (POST /api/shift/review).
+    const handleShiftReview = async () => {
+        let token = OPEN_APPROVAL ? "open" : sessionStorage.getItem("approverToken") || "";
+        if (!token) {
+            token = (window.prompt("Enter your approver token:") || "").trim();
+            if (!token) return;
+            sessionStorage.setItem("approverToken", token);
+        }
+        const note = window.prompt("Review note (optional):", "") ?? null;
+        if (note === null) return;
+        try {
+            setReviewing(true);
+            await axios.post(`${API_URL}/api/shift/review`, { note }, { headers: { "X-Approver-Token": token } });
+            const res = await axios.get(`${API_URL}/api/summary`);
+            setSummary(res.data);
+        } catch (err) {
+            if (err?.response?.status === 401) sessionStorage.removeItem("approverToken");
+            alert(`Failed to mark the episode as reviewed: ${err?.response?.data?.detail || err?.message}`);
+        } finally {
+            setReviewing(false);
+        }
+    };
+
     const isStale = useMemo(() => {
-        if (!summary || !summary.data_timestamp) return false;
+        if (!summary || !summary.data_timestamp || summary.replay) return false;
         const sensorTime = new Date(summary.data_timestamp);
         const diffMins = Math.floor((new Date() - sensorTime) / 60000);
         return diffMins > 30;
@@ -267,11 +296,34 @@ export default function Dashboard() {
                 </div>
             )}
 
+            {/* SHIFT REMINDER: an episode left unreviewed too long (notice only, no work order is drafted) */}
+            {summary.shift_reminder && (
+                <div className="mb-6 bg-amber-50 border-l-4 border-amber-500 p-4 rounded-r shadow-sm flex flex-col md:flex-row md:items-center gap-4">
+                    <div className="text-3xl">⏰</div>
+                    <div className="flex-1">
+                        <h3 className="font-bold text-amber-800 text-lg">
+                            Reminder: distribution shift unreviewed for {summary.shift_reminder.open_hours} h
+                        </h3>
+                        <p className="text-amber-700 text-sm mt-1">{summary.shift_reminder.message}</p>
+                    </div>
+                    <button
+                        onClick={handleShiftReview}
+                        disabled={reviewing}
+                        className="px-4 py-2 rounded-lg bg-amber-600 text-white text-sm font-semibold hover:bg-amber-700 disabled:opacity-50"
+                    >
+                        {reviewing ? "Saving..." : "Mark as reviewed"}
+                    </button>
+                </div>
+            )}
+
             {/* HEADER */}
             <header className="mb-6 flex flex-col md:flex-row justify-between items-center bg-white p-6 rounded-xl shadow-sm border border-gray-100">
                 <div>
                     <h1 className="text-2xl font-bold text-gray-900">Predictive Maintenance Dashboard</h1>
-                    <p className="text-gray-500 text-sm mt-1">System: Conveyor 450W | Last Reading: {summary.data_timestamp}</p>
+                    <p className="text-gray-500 text-sm mt-1">
+                        System: Conveyor 450W | Last Reading: {summary.data_timestamp}
+                        {summary.replay && <span className="ml-2 text-xs text-gray-400">({summary.replay})</span>}
+                    </p>
                 </div>
                 
                 {/* UPDATED STATUS BOX (Matches ISO Colors) */}
@@ -280,6 +332,12 @@ export default function Dashboard() {
                         {summary.iso_zone !== 'A' && <span className="mr-2">⚠️</span>}
                         Zone {summary.iso_zone} - {summary.status}
                     </span>
+                    {summary.machine_status && (
+                        <span className="text-xs font-semibold mt-1" title={(summary.alert_reasons || []).join("\n")}>
+                            Alert level: {summary.machine_status}
+                            {summary.shift_episode && !summary.shift_episode.reviewed ? ` · shift since ${summary.shift_episode.since}` : ""}
+                        </span>
+                    )}
                 </div>
             </header>
 
@@ -324,13 +382,13 @@ export default function Dashboard() {
                                 <Legend />
                                 
                                 {/* 1. Normal History Line (Blue, Solid) */}
-                                <Line type="monotone" dataKey="history" stroke="#2563eb" strokeWidth={2} dot={false} name="Real History" connectNulls />
+                                <Line type="monotone" dataKey="history" stroke="#2563eb" strokeWidth={2} dot={false} name="Real History" connectNulls isAnimationActive={ANIMATE} />
                                 
                                 {/* 2. Interpolated Error Overlay (Red, Dotted with points) */}
-                                <Line type="monotone" dataKey="history_error" stroke="#ef4444" strokeDasharray="5 5" strokeWidth={3} dot={{ r: 4, fill: '#ef4444' }} name="Controller Error" connectNulls={false} />
+                                <Line type="monotone" dataKey="history_error" stroke="#ef4444" strokeDasharray="5 5" strokeWidth={3} dot={{ r: 4, fill: '#ef4444' }} name="Controller Error" connectNulls={false} isAnimationActive={ANIMATE} />
                                 
                                 {/* 3. AI Forecast Line (Purple) */}
-                                <Line type="monotone" dataKey="forecast" stroke="#8b5cf6" strokeWidth={2} strokeDasharray="5 5" dot={false} name="AI Forecast" connectNulls />
+                                <Line type="monotone" dataKey="forecast" stroke="#8b5cf6" strokeWidth={2} strokeDasharray="5 5" dot={false} name="AI Forecast" connectNulls isAnimationActive={ANIMATE} />
                             </LineChart>
                         </ResponsiveContainer>
                     </div>
@@ -347,7 +405,7 @@ export default function Dashboard() {
                                 <XAxis type="number" tick={{fontSize: 12, fill: '#9ca3af'}} />
                                 <YAxis dataKey="feature" type="category" width={120} tick={{fontSize: 11, fill: '#4b5563', fontWeight: 600}} />
                                 <Tooltip cursor={{fill: '#f3f4f6'}} contentStyle={{borderRadius: '8px'}} />
-                                <Bar dataKey="importance" fill="#4b5563" radius={[0, 4, 4, 0]} barSize={18} />
+                                <Bar dataKey="importance" fill="#4b5563" radius={[0, 4, 4, 0]} barSize={18} isAnimationActive={ANIMATE} />
                             </BarChart>
                         </ResponsiveContainer>
                     </div>
@@ -358,13 +416,13 @@ export default function Dashboard() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
                 {/* Anomaly Analysis (spans 2 cols on large screens) */}
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col gap-4 lg:col-span-2">
-                    <h2 className="text-lg font-semibold mb-2 flex items-center"><span className="w-2 h-2 rounded-full bg-purple-500 mr-2"></span>Anomaly Analysis</h2>
+                    <h2 className="text-lg font-semibold mb-2 flex items-center"><span className="w-2 h-2 rounded-full bg-purple-500 mr-2"></span>Distribution-Shift Analysis</h2>
                     
                     {/* TOP: RAW DISTRIBUTION */}
                     <div className="h-[140px] w-full border-b border-gray-100 pb-2">
                         <div className="flex justify-between items-center mb-2">
                             <h2 className="text-sm font-semibold text-gray-700">1. Signal Distribution ({selectedTarget})</h2>
-                            <span className="text-xs text-gray-400">Red dots indicate anomalies</span>
+                            <span className="text-xs text-gray-400">Red dots: windows flagged by the shift rule</span>
                         </div>
                         <ResponsiveContainer width="100%" height="100%">
                             <ScatterChart margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
@@ -378,7 +436,7 @@ export default function Dashboard() {
                                     width={30} 
                                 />
                                 <Tooltip cursor={{ strokeDasharray: '3 3' }} contentStyle={{borderRadius: '8px'}} labelFormatter={() => ''} />
-                                <Scatter name="Raw Signal" data={anomalyData} fill="#8884d8" shape="circle">
+                                <Scatter name="Raw Signal" data={anomalyData} fill="#8884d8" shape="circle" isAnimationActive={ANIMATE}>
                                     {anomalyData.map((entry, index) => (
                                         <Cell key={`cell-raw-${index}`} fill={entry.score < threshold ? '#ef4444' : '#93c5fd'} />
                                     ))}
@@ -390,8 +448,8 @@ export default function Dashboard() {
                     {/* BOTTOM: IDK SCORE */}
                     <div className="h-[140px] w-full">
                         <div className="flex justify-between items-center mb-2">
-                            <h2 className="text-sm font-semibold text-gray-700">2. Anomaly Confidence (IDK Score)</h2>
-                            <span className="text-xs text-gray-400">Low Score = Anomaly</span>
+                            <h2 className="text-sm font-semibold text-gray-700">2. Window Similarity (s-IDK² Score)</h2>
+                            <span className="text-xs text-gray-400">Below the dashed threshold = flagged</span>
                         </div>
                         <ResponsiveContainer width="100%" height="100%">
                             <ScatterChart margin={{ top: 5, right: 10, bottom: 0, left: 0 }}>
@@ -405,7 +463,7 @@ export default function Dashboard() {
                                 <YAxis type="number" dataKey="score" domain={[0, 'auto']} tick={{fontSize: 10}} width={30} />
                                 <Tooltip cursor={{ strokeDasharray: '3 3' }} contentStyle={{borderRadius: '8px'}} labelFormatter={(label) => new Date(label).toLocaleString()} />
                                 <ReferenceLine y={threshold} stroke="#ef4444" strokeDasharray="3 3" />
-                                <Scatter name="IDK Score" data={anomalyData} fill="#8884d8">
+                                <Scatter name="IDK Score" data={anomalyData} fill="#8884d8" isAnimationActive={ANIMATE}>
                                     {anomalyData.map((entry, index) => (
                                         <Cell key={`cell-idk-${index}`} fill={entry.score < threshold ? '#ef4444' : '#8b5cf6'} />
                                     ))}
