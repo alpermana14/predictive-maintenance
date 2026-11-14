@@ -15,7 +15,7 @@ from typing import Optional
 from langchain_core.documents import Document
 
 # Import logic from your ML Engine
-from ml_engine import run_pipeline, load_conveyor_data, TARGETS, UNITS, FREQ
+from ml_engine import run_pipeline, load_conveyor_data, latest_row_id, TARGETS, UNITS, FREQ
 import audit
 import machine_status as ms_rules
 
@@ -48,12 +48,14 @@ class MachineState:
     shift_status = None  # per channel: threshold, latest score and flag (rule B1)
     shift_events = None  # flagged windows of the last 7 days
     shift_episode = None  # open distribution-shift episode, kept until an operator reviews it
+    last_row_id = None    # newest MySQL row already analysed (new-data check)
 
 state = MachineState()
 state.forecast_log = []
 state.shift_status = {}
 state.shift_events = []
 
+NEW_DATA_CHECK_MINUTES = 2  # how often MySQL is checked for a new sensor reading
 FORECAST_LOG_DAYS = 7
 FORECAST_ERROR_WINDOW = pd.Timedelta(hours=24)
 FORECAST_POINTS = {"+1 h": 2, "+3 h": 6, "+6 h": 12}  # steps of 30 minutes
@@ -208,13 +210,32 @@ def update_machine_state():
     except Exception as e:
         print(f"[ERROR] Scheduler update failed: {str(e)}")
 
+def check_for_new_data():
+    """Runs the update cycle as soon as a new sensor row is in MySQL.
+
+    The sensor sends a reading about every 30 minutes, but not on a fixed clock (the interval drifts by
+    about half a minute per reading). A fixed 30-minute timer could therefore leave a new reading
+    unprocessed for up to 30 minutes; checking every few minutes keeps that wait short.
+    """
+    try:
+        row_id = latest_row_id()
+    except Exception as e:
+        print(f"[WARN] New-data check failed: {e}")
+        return
+    if row_id is None or row_id == state.last_row_id:
+        return
+    print(f"[INFO] New sensor row {row_id} in MySQL (last analysed: {state.last_row_id})")
+    # Recorded before the run, so a failing cycle is retried on the next new row instead of every check
+    state.last_row_id = row_id
+    update_machine_state()
+
 @app.on_event("startup")
 def start_realtime_system():
     """Initializes the system and starts the background timer."""
     print("[INFO] System startup: Initializing AI Engine...")
     
     # 1. Run immediately so the dashboard isn't empty when you open it
-    update_machine_state()
+    check_for_new_data()
     
     # 2. Setup Bentley iTwin IoT sensors (one-time registration)
     try:
@@ -222,14 +243,13 @@ def start_realtime_system():
     except Exception as e:
         print(f"[WARN] iTwin sensor setup failed (non-critical): {e}")
     
-    # 3. Retrain and refresh every 30 minutes, the resolution at which the analytics
-    # run (one new 30-min sample per cycle). The interval also leaves headroom for
-    # retraining time as the history grows.
+    # 3. Check MySQL for a new reading every 2 minutes and retrain/refresh only when one has arrived
+    # (one new 30-min sample per cycle, as before, but without waiting for a fixed 30-minute timer).
     scheduler = BackgroundScheduler()
-    scheduler.add_job(update_machine_state, 'interval', minutes=30, max_instances=1, coalesce=True)
+    scheduler.add_job(check_for_new_data, 'interval', minutes=NEW_DATA_CHECK_MINUTES, max_instances=1, coalesce=True)
     scheduler.start()
 
-    print("[INFO] Scheduler is active: retraining and refreshing every 30 minutes.")
+    print(f"[INFO] Scheduler is active: checking for new sensor data every {NEW_DATA_CHECK_MINUTES} minutes.")
 
 # ===================== 3. API ENDPOINTS =====================
 
@@ -292,7 +312,8 @@ def get_summary():
     alert = current_alert()
     return {
         "timestamp": state.last_update,  # The time the AI actually ran
-        "data_timestamp": str(latest.name), # The time of the sensor reading
+        "data_timestamp": str(latest.name), # The 30-min slot of the sensor reading (rounded)
+        "reading_time": str(state.data.attrs.get("last_reading", latest.name)),  # actual time of the latest reading
         # the six analysed channels only (motor current is not used, Section 4.1)
         "metrics": {k: latest[k] for k in TARGETS if k in latest.index},
         "status": status,

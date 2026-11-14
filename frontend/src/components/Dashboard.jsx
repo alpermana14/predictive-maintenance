@@ -8,6 +8,9 @@ import {
 // ================= 1. CONFIGURATION =================
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
 const REFRESH_RATE = 5000;
+// The sensor sends a reading about every 30.5 min and the backend picks it up within a few minutes,
+// so data older than this means a reading is missing
+const STALE_MINUTES = 45;
 // Demo deployment (VITE_APPROVAL_MODE=open, set in the deploy workflow): no approver token is asked for
 const OPEN_APPROVAL = import.meta.env.VITE_APPROVAL_MODE === "open";
 // ?noanim in the URL turns chart animations off (used for static screenshots of the dashboard)
@@ -244,9 +247,9 @@ export default function Dashboard() {
 
     const isStale = useMemo(() => {
         if (!summary || !summary.data_timestamp || summary.replay) return false;
-        const sensorTime = new Date(summary.data_timestamp);
+        const sensorTime = new Date(summary.reading_time || summary.data_timestamp);
         const diffMins = Math.floor((new Date() - sensorTime) / 60000);
-        return diffMins > 30;
+        return diffMins > STALE_MINUTES;
     }, [summary]);
 
     useEffect(() => {
@@ -289,7 +292,7 @@ export default function Dashboard() {
                     <div>
                         <h3 className="font-bold text-red-800 text-lg">Connection Warning: Data is Not Real-Time</h3>
                         <p className="text-red-700 text-sm mt-1">
-                            The latest reading was received at <span className="font-mono font-bold">{summary.data_timestamp}</span>.
+                            The latest reading was received at <span className="font-mono font-bold">{summary.reading_time || summary.data_timestamp}</span>.
                         </p>
                         <p className="text-red-600 text-xs mt-2 font-semibold uppercase tracking-wide">
                             Action Required: Check Controller Power • Check Internet Connection • Inspect Conveyor System
@@ -323,7 +326,7 @@ export default function Dashboard() {
                 <div>
                     <h1 className="text-2xl font-bold text-gray-900">Predictive Maintenance Dashboard</h1>
                     <p className="text-gray-500 text-sm mt-1">
-                        System: Conveyor 450W | Last Reading: {summary.data_timestamp}
+                        System: Conveyor 450W | Last Reading: {summary.reading_time || summary.data_timestamp}
                         {summary.replay && <span className="ml-2 text-xs text-gray-400">({summary.replay})</span>}
                     </p>
                 </div>

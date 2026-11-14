@@ -151,7 +151,8 @@ def load_conveyor_data():
         df["datetime"] = df["datetime"].dt.tz_localize(None)
 
         df = df.sort_values("datetime").reset_index(drop=True)
-        
+        last_reading = df["datetime"].iloc[-1]  # actual time of the latest reading, before rounding
+
         # Resample to 30min intervals
         df["datetime"] = pd.to_datetime(df["datetime"]).dt.round("30min")
         #df = df.groupby("datetime").first().resample("30min").ffill() #make the Nan value filled with last value
@@ -174,7 +175,8 @@ def load_conveyor_data():
         # Clean columns
         cols_to_drop = ["conveyor_id", "category"]
         df = df.drop(columns=[c for c in cols_to_drop if c in df.columns]).round(2)
-        
+        df.attrs["last_reading"] = last_reading
+
         print(f"[INFO] Data Loaded: {len(df)} records")
         return df
         
@@ -182,6 +184,16 @@ def load_conveyor_data():
         print(f"[ERROR] DB Error: {e}")
         # Return empty structure to prevent crash
         return pd.DataFrame(columns=TARGETS)
+
+def latest_row_id():
+    """ID of the newest sensor row in MySQL (a cheap query, used to detect new data)."""
+    conn = mysql.connector.connect(**DB_CONFIG)
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT MAX(conveyor_id) FROM {TABLE_NAME}")
+        return cur.fetchone()[0]
+    finally:
+        conn.close()
 
 # ===================== FEATURE ENGINEERING =====================
 def make_lag_features(df, lag_steps):
