@@ -369,7 +369,7 @@ export default function Dashboard() {
 
             {/* DIGITAL TWIN: scan-to-BIM model of the lab with live sensor values */}
             <Suspense fallback={<div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-6 text-sm text-gray-400">Loading digital twin...</div>}>
-                <DigitalTwin summary={summary} selectedTarget={selectedTarget} onSelectTarget={setSelectedTarget} />
+                <DigitalTwin summary={summary} selectedTarget={selectedTarget} onSelectTarget={setSelectedTarget} running={!isStale} />
             </Suspense>
 
             {/* ROW 1: FORECAST & DIAGNOSTICS */}

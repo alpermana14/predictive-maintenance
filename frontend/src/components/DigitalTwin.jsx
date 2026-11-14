@@ -57,7 +57,47 @@ function buildElement(el, mats) {
         mesh.userData.elementId = el.id;
         group.add(mesh);
     });
+    if (el.motion) {
+        const loop = buildPlateLoop(el.motion, mats[el.motion.material]);
+        loop.mesh.userData.elementId = el.id;
+        group.add(loop.mesh);
+        group.userData.loop = loop;
+    }
     return group;
+}
+
+// Moving conveyor plates: one InstancedMesh; place(offset) puts every plate on the loop at its arc length
+// and turns it to face the direction of travel (the plate profile travels along +x)
+function buildPlateLoop(m, mat) {
+    const shape = new THREE.Shape(m.plate.map(([a, b]) => new THREE.Vector2(a, b)));
+    const geom = new THREE.ExtrudeGeometry(shape, { depth: m.z1 - m.z0, bevelEnabled: false, curveSegments: 1 });
+    const mesh = new THREE.InstancedMesh(geom, mat, m.count);
+    const straight = m.yn - m.ys, turn = Math.PI * m.radius, length = 2 * straight + 2 * turn;
+    // east lane northwards, north turn, west lane southwards, south turn
+    const at = (s) => {
+        s = ((s % length) + length) % length;
+        if (s < straight) return [m.xc + m.radius, m.ys + s, Math.PI / 2];
+        s -= straight;
+        if (s < turn) {
+            const t = s / m.radius;
+            return [m.xc + m.radius * Math.cos(t), m.yn + m.radius * Math.sin(t), t + Math.PI / 2];
+        }
+        s -= turn;
+        if (s < straight) return [m.xc - m.radius, m.yn - s, -Math.PI / 2];
+        const t = Math.PI + (s - straight) / m.radius;
+        return [m.xc + m.radius * Math.cos(t), m.ys + m.radius * Math.sin(t), t + Math.PI / 2];
+    };
+    const matrix = new THREE.Matrix4(), rotation = new THREE.Matrix4();
+    const place = (offset) => {
+        for (let i = 0; i < m.count; i++) {
+            const [x, y, heading] = at(offset + (i * length) / m.count);
+            mesh.setMatrixAt(i, matrix.makeTranslation(x, y, m.z0).multiply(rotation.makeRotationZ(heading)));
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+    };
+    place(0);
+    mesh.computeBoundingSphere();  // the plates stay on the loop, so one bounding sphere is enough for picking
+    return { mesh, place, speed: m.speed, offset: 0 };
 }
 
 // cloud.bin: 'PCL2', N, S, S segment counts (interior, ceiling, wall 0..n-1), min xyz, scale xyz,
@@ -106,13 +146,15 @@ function sensorColor(sensor, summary) {
 const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '–');
 
 // ================= 4. COMPONENT =================
-export default function DigitalTwin({ summary, selectedTarget, onSelectTarget }) {
+// running: live sensor data is arriving (the dashboard's stale check), so the conveyor is animated
+export default function DigitalTwin({ summary, selectedTarget, onSelectTarget, running = true }) {
     const mountRef = useRef(null);
     const ctx = useRef({});
     const [twin, setTwin] = useState(null);
     const [error, setError] = useState(null);
     const [selected, setSelected] = useState(null);
     const [layers, setLayers] = useState({ ceiling: false, walls: true, cloud: false });
+    const [paused, setPaused] = useState(false);
     const [cloudState, setCloudState] = useState('idle');
 
     useEffect(() => {
@@ -269,8 +311,14 @@ export default function DigitalTwin({ summary, selectedTarget, onSelectTarget })
         ro.observe(mount);
         resize();
 
+        const loops = Object.values(groups).map(g => g.userData.loop).filter(Boolean);
+        const clock = new THREE.Clock();
         let raf;
         const tick = () => {
+            const dt = Math.min(clock.getDelta(), 0.1);  // no jump after the tab was in the background
+            if (ctx.current.moving) {
+                loops.forEach(l => { l.offset += l.speed * dt; l.place(l.offset); });
+            }
             controls.update();
             updateVisibility();
             renderer.render(scene, camera);
@@ -299,6 +347,7 @@ export default function DigitalTwin({ summary, selectedTarget, onSelectTarget })
     // Keep the latest props/layers available to the render loop and DOM handlers
     useEffect(() => { ctx.current.onSelectTarget = onSelectTarget; }, [onSelectTarget]);
     useEffect(() => { ctx.current.layers = layers; }, [layers]);
+    useEffect(() => { ctx.current.moving = running && !paused; }, [running, paused]);
 
     // Live values from /api/summary
     useEffect(() => {
@@ -347,6 +396,7 @@ export default function DigitalTwin({ summary, selectedTarget, onSelectTarget })
                     </button>
                     <button className={btn(false)} onClick={() => ctx.current.setView?.('asset')}>Focus motor & conveyor</button>
                     <button className={btn(false)} onClick={() => ctx.current.setView?.('room')}>Whole room</button>
+                    <button className={btn(false)} onClick={() => setPaused(p => !p)}>{paused ? '▶ Run conveyor' : '⏸ Pause conveyor'}</button>
                 </div>
             </div>
 
@@ -378,7 +428,7 @@ export default function DigitalTwin({ summary, selectedTarget, onSelectTarget })
                                         </button>
                                     ))}
                                 </div>
-                                <div className="text-[10px] text-gray-400 mt-2">Data: {summary.data_timestamp}</div>
+                                <div className="text-[10px] text-gray-400 mt-2">Reading: {summary.reading_time || summary.data_timestamp}</div>
                             </div>
                         )}
                     </div>
@@ -390,6 +440,9 @@ export default function DigitalTwin({ summary, selectedTarget, onSelectTarget })
                         <span key={z} className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: c }}></span>Zone {z}</span>
                     ))}
                     <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: FLAGGED }}></span>Shift flagged</span>
+                    <span className="font-semibold">
+                        Conveyor: {!running ? 'stopped (no live data)' : paused ? 'paused' : 'moving (live data)'}
+                    </span>
                     <span className="text-gray-400">Click an object for details · click a sensor value to chart it</span>
                 </div>
             </div>
