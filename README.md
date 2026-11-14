@@ -81,7 +81,7 @@ Laser scan (E57 + LAS) ──► point-cloud processing (Python) ──► Revit
 * **Point cloud:** `frontend/public/twin/cloud.bin` (5.4 MB), loaded only when the *Point cloud* button is pressed.
 * **Live data:** the viewer reuses `/api/summary`, which the dashboard polls every 5 s. The box around the conveyor takes the colour of the ISO 10816 zone, channels flagged by the distribution-shift episode are marked with ⚠, and clicking a sensor value selects it in the forecast and diagnostics charts.
 * **Sensors** (vibration, temperature, noise) are mounted on the drive motor under the conveyor. Their positions are listed under `sensors` in `twin.json`.
-* **Moving conveyor:** a simulation moves the crescent plates clockwise around the loop, with the payload box riding on them, while live sensor data arrives, and stops them when the dashboard reports the data as stale. *Pause conveyor* stops the animation by hand.
+* **Moving conveyor:** a simulation moves the crescent plates clockwise around the loop, with three payload boxes spaced evenly along it riding on them, while live sensor data arrives, and stops them when the dashboard reports the data as stale. *Pause conveyor* stops the animation by hand.
 
 #### Technologies
 | Layer | Technology | Licence |
