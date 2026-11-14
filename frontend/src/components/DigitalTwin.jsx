@@ -441,7 +441,7 @@ export default function DigitalTwin({ summary, selectedTarget, onSelectTarget, r
                     ))}
                     <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: FLAGGED }}></span>Shift flagged</span>
                     <span className="font-semibold">
-                        Conveyor: {!running ? 'stopped (no live data)' : paused ? 'paused' : 'moving (live data)'}
+                        Conveyor: {!running ? 'stopped (no live data)' : paused ? 'paused' : 'moving (simulation)'}
                     </span>
                     <span className="text-gray-400">Click an object for details · click a sensor value to chart it</span>
                 </div>
