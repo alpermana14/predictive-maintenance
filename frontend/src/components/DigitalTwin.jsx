@@ -58,20 +58,30 @@ function buildElement(el, mats) {
         group.add(mesh);
     });
     if (el.motion) {
-        const loop = buildPlateLoop(el.motion, mats[el.motion.material]);
-        loop.mesh.userData.elementId = el.id;
-        group.add(loop.mesh);
+        const loop = buildPlateLoop(el.motion, mats);
+        [loop.mesh, ...loop.payloads].forEach(o => {
+            o.userData.elementId = el.id;
+            group.add(o);
+        });
         group.userData.loop = loop;
     }
     return group;
 }
 
 // Moving conveyor plates: one InstancedMesh; place(offset) puts every plate on the loop at its arc length
-// and turns it to face the direction of travel (the plate profile travels along +x)
-function buildPlateLoop(m, mat) {
+// and turns it to face along the loop (the plate profile lies along +x). Payload boxes ride on the plates
+// at a fixed arc position relative to them. A negative speed runs the loop clockwise.
+function buildPlateLoop(m, mats) {
     const shape = new THREE.Shape(m.plate.map(([a, b]) => new THREE.Vector2(a, b)));
     const geom = new THREE.ExtrudeGeometry(shape, { depth: m.z1 - m.z0, bevelEnabled: false, curveSegments: 1 });
-    const mesh = new THREE.InstancedMesh(geom, mat, m.count);
+    const mesh = new THREE.InstancedMesh(geom, mats[m.material], m.count);
+    const payloads = (m.payloads || []).map(p => {
+        const [length, width, height] = p.size;
+        const box = new THREE.Mesh(new THREE.BoxGeometry(length, width, height).translate(0, 0, m.z1 + height / 2), mats[p.material]);
+        box.matrixAutoUpdate = false;
+        box.userData.s = p.s;
+        return box;
+    });
     const straight = m.yn - m.ys, turn = Math.PI * m.radius, length = 2 * straight + 2 * turn;
     // east lane northwards, north turn, west lane southwards, south turn
     const at = (s) => {
@@ -94,10 +104,15 @@ function buildPlateLoop(m, mat) {
             mesh.setMatrixAt(i, matrix.makeTranslation(x, y, m.z0).multiply(rotation.makeRotationZ(heading)));
         }
         mesh.instanceMatrix.needsUpdate = true;
+        payloads.forEach(box => {
+            const [x, y, heading] = at(offset + box.userData.s);
+            box.matrix.makeTranslation(x, y, 0).multiply(rotation.makeRotationZ(heading));
+            box.matrixWorldNeedsUpdate = true;
+        });
     };
     place(0);
     mesh.computeBoundingSphere();  // the plates stay on the loop, so one bounding sphere is enough for picking
-    return { mesh, place, speed: m.speed, offset: 0 };
+    return { mesh, payloads, place, speed: m.speed, offset: 0 };
 }
 
 // cloud.bin: 'PCL2', N, S, S segment counts (interior, ceiling, wall 0..n-1), min xyz, scale xyz,
