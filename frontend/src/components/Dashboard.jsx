@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import axios from 'axios';
 import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
@@ -12,6 +12,8 @@ const REFRESH_RATE = 5000;
 const OPEN_APPROVAL = import.meta.env.VITE_APPROVAL_MODE === "open";
 // ?noanim in the URL turns chart animations off (used for static screenshots of the dashboard)
 const ANIMATE = !new URLSearchParams(window.location.search).has("noanim");
+// The 3D viewer (three.js) is loaded as a separate chunk so the dashboard itself stays light
+const DigitalTwin = lazy(() => import('./DigitalTwin'));
 
 // ================= 2. ISO SEVERITY COMPONENT =================
 const IsoSeverityChart = ({ zRms, xRms }) => {
@@ -361,6 +363,11 @@ export default function Dashboard() {
                     );
                 })}
             </div>
+
+            {/* DIGITAL TWIN: scan-to-BIM model of the lab with live sensor values */}
+            <Suspense fallback={<div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-6 text-sm text-gray-400">Loading digital twin...</div>}>
+                <DigitalTwin summary={summary} selectedTarget={selectedTarget} onSelectTarget={setSelectedTarget} />
+            </Suspense>
 
             {/* ROW 1: FORECAST & DIAGNOSTICS */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
