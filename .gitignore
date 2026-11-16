@@ -22,3 +22,6 @@ node_modules/
 # --- System ---
 .DS_Store
 Thumbs.db
+# --- Demo replay (demo/) ---
+demo/cache/
+demo/results/

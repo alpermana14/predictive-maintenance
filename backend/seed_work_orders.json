@@ -1,0 +1,16 @@
+[
+  {
+    "id": "work_order_2025_11_25_090000_woe",
+    "fixture": "WO-E",
+    "created_at": "2025-11-25T09:00:00",
+    "source": "synthetic fixture (outdated, conflicts with the manual and WO-C)",
+    "content": "Routine maintenance:\n  Date : 2025-11-25\nTask: lubricated the slide rail with mineral oil.\nInterval: quarterly.\nResult: completed.\nPriority: Low"
+  },
+  {
+    "id": "work_order_2026_01_20_084500_woc",
+    "fixture": "WO-C",
+    "created_at": "2026-01-20T08:45:00",
+    "source": "synthetic fixture",
+    "content": "Routine maintenance:\n  Date : 2026-01-20\nTask: cleaned the conveyor chain and slide rail and lubricated them with silicone-based lubricant, as in the manual.\nInterval agreed with the supervisor: monthly.\nResult: completed, no defects found.\nPriority: Low"
+  }
+]

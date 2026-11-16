@@ -18,6 +18,7 @@ from langchain_core.documents import Document
 from ml_engine import run_pipeline, load_conveyor_data, latest_row_id, TARGETS, UNITS, FREQ
 import audit
 import machine_status as ms_rules
+import work_order_seeds
 
 # Import Bentley iTwin IoT Bridge
 import itwin_bridge
@@ -233,7 +234,16 @@ def check_for_new_data():
 def start_realtime_system():
     """Initializes the system and starts the background timer."""
     print("[INFO] System startup: Initializing AI Engine...")
-    
+
+    # 0. Demo deployment (SEED_WORK_ORDERS=1, set in backend/Dockerfile): make sure the two earlier work orders
+    # of the demo are in the work-order store. Fixed ids, so restarts never duplicate them.
+    if os.getenv("SEED_WORK_ORDERS", "0").strip() == "1":
+        try:
+            added = work_order_seeds.ensure_seeded(vectorstore_history)
+            print(f"[INFO] Seed work orders: {'added ' + ', '.join(added) if added else 'already present'}")
+        except Exception as e:
+            print(f"[WARN] Seeding the demo work orders failed (non-critical): {e}")
+
     # 1. Run immediately so the dashboard isn't empty when you open it
     check_for_new_data()
     

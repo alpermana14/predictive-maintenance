@@ -23,6 +23,8 @@ COPY . .
 
 # Demo deployment: work orders are approved without an approver token (see _authorise in main.py)
 ENV APPROVAL_MODE=open
+# Demo deployment: the two earlier work orders of the demo (seed_work_orders.json) are added at start-up if missing
+ENV SEED_WORK_ORDERS=1
 # Approved work orders (/app/maintenance_history_db) and the audit log (/app/persist) must survive
 # redeploys: mount both paths as CapRover persistent directories.
 ENV AUDIT_LOG_PATH=/app/persist/audit_log.jsonl
