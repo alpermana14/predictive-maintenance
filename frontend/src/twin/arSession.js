@@ -1,8 +1,13 @@
 // Mixed-reality view of the digital twin for Meta Quest 3 (WebXR 'immersive-ar' in the Meta Quest Browser).
 //
-// Two modes:
-//   onsite   : the twin at 1:1, aligned to the real lab by aiming at two floor corners. The alignment is kept as a
-//              persistent WebXR anchor (and in localStorage), so it only has to be done once per headset.
+// Three modes:
+//   onsite   : the twin at 1:1 in the real lab. It is aligned automatically by fitting the room outline to the walls
+//              of the headset's Space Setup (WebXR plane detection); two floor corners aimed at with the ray are the
+//              fallback. The alignment is kept as a persistent WebXR anchor (and in localStorage), so it is restored
+//              in every later session on this headset and account.
+//   conveyor : only the conveyor at 1:1, aligned by touching two corners of its frame with the controller (no ray).
+//              It shares the saved alignment with onsite, so aligning here also corrects the on-site view at the
+//              conveyor.
 //   tabletop : a scale model of the lab placed on a table or the floor.
 //
 // The live machine state comes from the same /api/summary object the dashboard already polls (setSummary).
@@ -21,6 +26,18 @@ export const CALIBRATION = [
     { corner: 5, label: 'Corner 2: NORTH-WEST', hint: 'From corner 1, follow the other wall to its far end: the floor corner on the interactive display (TV) wall.' },
 ];
 
+// Conveyor mode: two points on the conveyor itself, touched with the controller. Room frame (z-up, metres): the top
+// corners of the conveyor frame (CONV-01 in twin.json, top rail at 0.99 m) on its long side facing the room
+// (x = 4.647, the east side is against the wall), at the motor (south) end and at the far (north) end, 1.81 m apart.
+export const TOUCH_POINTS = [
+    { p: [4.647, 0.017, 0.99], label: 'Point 1: MOTOR END', hint: 'The top corner of the conveyor frame at the motor end (by the wall), on the long side that faces the room.' },
+    { p: [4.647, 1.823, 0.99], label: 'Point 2: FAR END', hint: 'The top corner at the other end of the same long side.' },
+];
+const TOUCH_OFFSET = 0.05;  // the touch ball sits 5 cm in front of the controller, so the controller body stays clear
+const FIT_TOL = 0.25;       // wall fit: a scanned wall within 25 cm of a model wall counts as the same wall
+const MODES = ['onsite', 'conveyor', 'tabletop'];
+const XRAY_VIEW = { onsite: 1, conveyor: 0 };  // the view shown right after aligning, to check against the real conveyor
+
 // What each view shows. asset: the conveyor and motor ('solid' | 'xray' | 'hidden'); room: the rest of the model.
 const PRESETS = {
     onsite: [
@@ -28,6 +45,11 @@ const PRESETS = {
         { name: 'X-ray conveyor', asset: 'xray', room: false, cloud: false },
         { name: 'Scan check (point cloud)', asset: 'xray', room: false, cloud: true },
         { name: 'Full twin', asset: 'solid', room: true, cloud: false },
+    ],
+    conveyor: [
+        { name: 'X-ray conveyor', asset: 'xray', room: false, cloud: false },
+        { name: 'Solid conveyor', asset: 'solid', room: false, cloud: false },
+        { name: 'Status overlay', asset: 'hidden', room: false, cloud: false },
     ],
     tabletop: [
         { name: 'Room (cutaway)', asset: 'solid', room: true, cloud: false },
@@ -216,11 +238,25 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
         scene.add(pin);
         return pin;
     });
+    // Touch balls (conveyor alignment): one in front of each controller, put on the real corner instead of aiming
+    const ballGeom = new THREE.SphereGeometry(0.01, 16, 12);
+    const ballMat = new THREE.MeshBasicMaterial({ color: '#fde047', depthTest: false });
+    const balls = new Map();
+    const ballFor = (src) => {
+        if (!balls.has(src)) {
+            const ball = new THREE.Mesh(ballGeom, ballMat);
+            ball.renderOrder = 102;
+            scene.add(ball);
+            balls.set(src, ball);
+        }
+        return balls.get(src);
+    };
 
     // ---------- session (requested while the click's user activation is still valid) ----------
+    // plane-detection: the walls and floor of the headset's Space Setup, for the automatic on-site alignment
     const session = await navigator.xr.requestSession('immersive-ar', {
         requiredFeatures: ['local-floor'],
-        optionalFeatures: ['hit-test', 'anchors', 'hand-tracking'],
+        optionalFeatures: ['hit-test', 'anchors', 'hand-tracking', 'plane-detection'],
     });
     await renderer.xr.setSession(session);
     const refSpace = renderer.xr.getReferenceSpace();
@@ -252,14 +288,18 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
     // ---------- state ----------
     const poly = twin.room.polygon;
     const roomCenter = [0, 1].map(k => (Math.min(...poly.map(p => p[k])) + Math.max(...poly.map(p => p[k]))) / 2);
+    // align: how the current 1:1 pose was made ('auto' | 'corners' | 'touch' | 'restored'); fits: the wall fits of
+    // the last automatic alignment, best first (X steps through them); alignInfo: the quality line on the help panel
     const S = {
-        mode, preset: 0, step: 'place', calPoints: [], calError: null, scale: 1 / 12,
+        mode, preset: 0, step: 'place', calPoints: [], scale: 1 / 12,
+        align: null, alignInfo: null, fits: null, fitIndex: 0, autoStart: 0,
         summary, running, paused: false, ended: false,
         onsitePose: null, anchor: null, anchorUuid: null, anchorStatus: '', wantAnchor: false, reanchorAt: 0,
         cloud: null, cloudState: 'idle', message: '', activeSource: null, lastTime: 0, helpKey: '',
     };
     const hitSources = new Map(), targets = new Map(), rays = new Map(), prevButtons = new Map();
     const head = { pos: new THREE.Vector3(0, 1.6, 0), fwd: new THREE.Vector3(0, 0, -1), yaw: 0 };
+    const oneToOne = () => S.mode !== 'tabletop';
 
     const preset = () => PRESETS[S.mode][S.preset];
     const flash = (msg, ms = 4000) => {
@@ -272,17 +312,17 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
         try {
             localStorage.setItem(STORAGE_KEY, JSON.stringify({
                 pos: placement.position.toArray(), quat: placement.quaternion.toArray(),
-                uuid: S.anchorUuid, calError: S.calError, savedAt: new Date().toISOString(),
+                uuid: S.anchorUuid, method: S.align, info: S.alignInfo, savedAt: new Date().toISOString(),
             }));
         } catch { /* storage blocked: the alignment then lasts for this session only */ }
     };
 
     function setScaleDependent() {
         const s = placement.scale.x;
-        markers.forEach(m => m.scale.setScalar((S.mode === 'onsite' ? 0.025 : 0.006) / (0.03 * s)));
+        markers.forEach(m => m.scale.setScalar((oneToOne() ? 0.025 : 0.006) / (0.03 * s)));
         if (S.cloud) S.cloud[0].material.size = CLOUD_POINT_SIZE * s;
-        card.setWidth(S.mode === 'onsite' ? 0.36 : 0.16);
-        info.setWidth(S.mode === 'onsite' ? 0.3 : 0.18);
+        card.setWidth(oneToOne() ? 0.36 : 0.16);
+        info.setWidth(oneToOne() ? 0.3 : 0.18);
     }
 
     function applyPreset() {
@@ -305,14 +345,38 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
         drawHelp();
     }
 
-    function startCalibration() {
-        S.step = 'calibrate';
+    // ---------- 1:1 alignment ----------
+    // steps: 'auto' (wall fit, on-site), 'calibrate' (two floor corners with the ray), 'touch' (two conveyor corners)
+    function beginAlign(step) {
+        S.step = step;
         S.calPoints = [];
         S.anchor = null;
+        S.autoStart = 0;
         placement.visible = false;
         pins.forEach(p => { p.visible = false; });
         info.mesh.visible = false;
         drawHelp();
+    }
+    const startCalibration = () => beginAlign('calibrate');
+    const startTouch = () => beginAlign('touch');
+    const startAutoAlign = () => { S.fits = null; beginAlign('auto'); };
+
+    // X button: on-site steps from the automatic fit to the next-best fit, then to the two corners, then back to auto
+    function realign() {
+        if (S.mode === 'tabletop') { S.step = 'place'; drawHelp(); return; }
+        if (S.mode === 'conveyor') { startTouch(); return; }
+        if (S.step === 'calibrate') { startCalibration(); return; }
+        if (S.step === 'auto') return;
+        if (S.align === 'auto' && S.fits && S.fitIndex + 1 < S.fits.length) applyFit(S.fitIndex + 1);
+        else if (S.align === 'auto') startCalibration();
+        else startAutoAlign();
+    }
+    function realignLabel() {
+        if (S.mode === 'tabletop') return 're-place';
+        if (S.mode === 'conveyor') return 'touch-align again';
+        if (S.step === 'calibrate') return 'restart corners';
+        if (S.align === 'auto') return S.fits && S.fitIndex + 1 < S.fits.length ? 'next fit' : 'align with 2 corners';
+        return 'auto-align';
     }
 
     function applyMode(m) {
@@ -333,44 +397,199 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
                 placement.quaternion.copy(S.onsitePose.quat);
                 placement.visible = true;
                 S.step = 'placed';
-            } else startCalibration();
+            } else if (m === 'conveyor') startTouch();
+            else startAutoAlign();
         }
         setScaleDependent();
         applyPreset();
     }
 
-    // Two measured floor points p1, p2 (world) <-> the same corners q1, q2 in the model: yaw + translation, no scale.
-    // The difference between the measured and the modelled corner distance is reported as a quality check.
-    function solveCalibration() {
-        const [p1, p2] = S.calPoints;
-        const [q1, q2] = CALIBRATION.map(c => toThree([...poly[c.corner], 0]));
-        const theta = Math.atan2(q2.z - q1.z, q2.x - q1.x) - Math.atan2(p2.z - p1.z, p2.x - p1.x);
-        const quat = new THREE.Quaternion().setFromAxisAngle(Y_AXIS, theta);
-        const r1 = q1.clone().applyQuaternion(quat), r2 = q2.clone().applyQuaternion(quat);
-        placement.position.set((p1.x - r1.x + p2.x - r2.x) / 2, (p1.y + p2.y) / 2, (p1.z - r1.z + p2.z - r2.z) / 2);
+    function finishAlign(pos, quat, method, alignInfo, message) {
+        placement.position.copy(pos);
         placement.quaternion.copy(quat);
-        S.calError = Math.hypot(p2.x - p1.x, p2.z - p1.z) - Math.hypot(q2.x - q1.x, q2.z - q1.z);
-        S.onsitePose = { pos: placement.position.clone(), quat: placement.quaternion.clone() };
+        S.onsitePose = { pos: pos.clone(), quat: quat.clone() };
+        S.anchor = null;  // the new pose gets a new anchor (served in the frame loop)
+        S.align = method;
+        S.alignInfo = alignInfo;
         placement.visible = true;
         pins.forEach(p => { p.visible = false; });
         S.step = 'placed';
-        S.preset = 1;  // x-ray first, so the alignment can be checked against the real conveyor
+        S.preset = XRAY_VIEW[S.mode];  // x-ray first, so the alignment can be checked against the real conveyor
         applyPreset();
         S.wantAnchor = true;
-        flash(Math.abs(S.calError) > 0.1
-            ? 'Corner distance is off by more than 10 cm: check the corners and press X to align again.'
-            : 'Aligned. The x-ray conveyor should sit on the real one; fine-tune with the thumbsticks.', 7000);
+        flash(message, 7000);
+    }
+
+    // Two measured points p1, p2 (world) <-> the same points q1, q2 in the model: yaw + translation, no scale.
+    // The difference between the measured and the modelled distance is reported as a quality check.
+    function solveTwoPoints(method) {
+        const touch = method === 'touch';
+        const [p1, p2] = S.calPoints;
+        const [q1, q2] = touch ? TOUCH_POINTS.map(t => toThree(t.p)) : CALIBRATION.map(c => toThree([...poly[c.corner], 0]));
+        const theta = Math.atan2(q2.z - q1.z, q2.x - q1.x) - Math.atan2(p2.z - p1.z, p2.x - p1.x);
+        const quat = new THREE.Quaternion().setFromAxisAngle(Y_AXIS, theta);
+        const r1 = q1.clone().applyQuaternion(quat), r2 = q2.clone().applyQuaternion(quat);
+        const pos = new THREE.Vector3((p1.x - r1.x + p2.x - r2.x) / 2, (p1.y - r1.y + p2.y - r2.y) / 2, (p1.z - r1.z + p2.z - r2.z) / 2);
+        const cm = Math.abs(Math.hypot(p2.x - p1.x, p2.z - p1.z) - Math.hypot(q2.x - q1.x, q2.z - q1.z)) * 100;
+        const [good, fair] = touch ? [1.5, 3] : [5, 10];
+        const alignInfo = { text: `${touch ? 'Point' : 'Corner'} distance error: ${cm.toFixed(1)} cm`, color: cm <= good ? '#86efac' : cm <= fair ? '#fde047' : '#fca5a5' };
+        finishAlign(pos, quat, method, alignInfo, cm > fair
+            ? `The distance is off by ${cm.toFixed(0)} cm: check the ${touch ? 'points' : 'corners'} and press X to align again.`
+            : touch ? 'Aligned on the conveyor. Fine-tune with the thumbsticks if needed.'
+                : 'Aligned. The x-ray conveyor should sit on the real one; fine-tune with the thumbsticks.');
+    }
+
+    // ---------- automatic alignment to the Space Setup walls ----------
+    // Model walls (room outline) in the three.js floor plane (x, z) with their inward normals
+    const modelWalls = walls.map((w, i) => {
+        const b = poly[(i + 1) % poly.length];
+        return { a: [w.a[0], -w.a[1]], b: [b[0], -b[1]], n: [w.n[0], -w.n[1]] };
+    });
+    const dot2 = (a, b) => a[0] * b[0] + a[1] * b[1];
+
+    // Fits the room outline to the scanned walls: the yaw from the dominant wall direction (mod 90 deg), then, for each
+    // of the four 90-deg turns, the translation along both room axes that puts the most scanned wall length on model
+    // walls. Returns the fits whose matched wall length is at least 60% of the best one, best first (null if none).
+    function fitToWalls(frame) {
+        const det = [];
+        let floorY = null;
+        const m4 = new THREE.Matrix4();
+        for (const plane of frame.detectedPlanes) {
+            const pose = frame.getPose(plane.planeSpace, refSpace);
+            if (!pose) continue;
+            const label = (plane.semanticLabel || '').toLowerCase();
+            if (plane.orientation === 'horizontal') {
+                if (label === 'floor') floorY = pose.transform.position.y;
+                continue;
+            }
+            if (label && label !== 'wall') continue;  // door and window frames, furniture
+            m4.fromArray(pose.transform.matrix);
+            const n = new THREE.Vector3(0, 1, 0).applyQuaternion(tmpQ.copy(pose.transform.orientation)).setY(0);
+            if (n.lengthSq() < 0.8) continue;  // not vertical
+            n.normalize();
+            const pts = plane.polygon.map(p => new THREE.Vector3(p.x, p.y, p.z).applyMatrix4(m4));
+            if (pts.length < 2) continue;
+            const c = pts.reduce((sum, p) => sum.add(p), new THREE.Vector3()).divideScalar(pts.length);
+            if ((head.pos.x - c.x) * n.x + (head.pos.z - c.z) * n.z < 0) n.negate();  // inward: towards the user in the room
+            const d = [-n.z, n.x];
+            const s = pts.map(p => p.x * d[0] + p.z * d[1]);
+            const s0 = Math.min(...s), s1 = Math.max(...s);
+            if (s1 - s0 < 0.4) continue;
+            det.push({ n: [n.x, n.z], c: c.x * n.x + c.z * n.z, s0, s1, len: s1 - s0 });
+        }
+        if (det.length < 2) return null;
+        const total = det.reduce((sum, w) => sum + w.len, 0);
+        let sx = 0, sy = 0;
+        det.forEach(w => { const a = 4 * Math.atan2(w.n[1], w.n[0]); sx += w.len * Math.cos(a); sy += w.len * Math.sin(a); });
+        const phi = Math.atan2(sy, sx) / 4;  // the model's axis-aligned walls turned by theta point at -theta (mod 90 deg)
+        // Walls facing fewer than three directions (e.g. one corner of the room) do not fix the position: no fit
+        const facing = new Set(det.map(w => ((Math.round((Math.atan2(w.n[1], w.n[0]) - phi) / (Math.PI / 2)) % 4) + 4) % 4));
+        if (facing.size < 3) return null;
+
+        const fits = [];
+        for (let k = 0; k < 4; k++) {
+            const quat = new THREE.Quaternion().setFromAxisAngle(Y_AXIS, -phi + (k * Math.PI) / 2);
+            const rot = ([x, z]) => { const v = new THREE.Vector3(x, 0, z).applyQuaternion(quat); return [v.x, v.z]; };
+            const mw = modelWalls.map(w => {
+                const a = rot(w.a), b = rot(w.b), n = rot(w.n), d = [-n[1], n[0]];
+                const sa = dot2(a, d), sb = dot2(b, d);
+                return { n, d, c: dot2(a, n), s0: Math.min(sa, sb), s1: Math.max(sa, sb) };
+            });
+            const pairs = [];  // (scanned wall, model wall) with the same inward normal
+            det.forEach(w => mw.forEach(m => { if (dot2(w.n, m.n) > 0.97) pairs.push({ w, m }); }));
+            const axes = [rot([1, 0]), rot([0, 1])];
+            const t = [];
+            for (const u of axes) {
+                const along = pairs.filter(p => Math.abs(dot2(p.m.n, u)) > 0.9)
+                    .map(p => ({ w: p.w, tu: (p.w.c - p.m.c) * Math.sign(dot2(p.m.n, u)) }));
+                if (!along.length) break;
+                // each scanned wall counts once, with its pair closest to the candidate shift
+                const inliers = (tu) => {
+                    const byWall = new Map();
+                    along.forEach(p => {
+                        const r = Math.abs(p.tu - tu);
+                        if (r < FIT_TOL && (!byWall.has(p.w) || r < Math.abs(byWall.get(p.w).tu - tu))) byWall.set(p.w, p);
+                    });
+                    return [...byWall.values()];
+                };
+                const weight = (ps) => ps.reduce((sum, p) => sum + p.w.len, 0);
+                let best = along[0].tu, bestW = -1;
+                along.forEach(p => { const wt = weight(inliers(p.tu)); if (wt > bestW) { bestW = wt; best = p.tu; } });
+                const inl = inliers(best);
+                t.push(inl.reduce((sum, p) => sum + p.tu * p.w.len, 0) / weight(inl));
+            }
+            if (t.length < 2) continue;  // scanned walls in one direction only: the shift along the other is unknown
+            const T = [axes[0][0] * t[0] + axes[1][0] * t[1], axes[0][1] * t[0] + axes[1][1] * t[1]];
+            let matched = 0;
+            det.forEach(w => {
+                let ov = 0;
+                mw.forEach(m => {
+                    if (dot2(w.n, m.n) < 0.97 || Math.abs(w.c - m.c - dot2(T, m.n)) > FIT_TOL) return;
+                    const sh = dot2(T, m.d);
+                    ov = Math.max(ov, Math.min(w.s1, m.s1 + sh) - Math.max(w.s0, m.s0 + sh));
+                });
+                matched += ov;
+            });
+            fits.push({ quat, pos: new THREE.Vector3(T[0], floorY ?? 0, T[1]), matched, coverage: matched / total, walls: det.length });
+        }
+        fits.sort((a, b) => b.matched - a.matched);
+        if (!fits.length || fits[0].matched < Math.max(1.5, 0.3 * total)) return null;
+        return fits.filter(f => f.matched >= 0.6 * fits[0].matched);
+    }
+
+    function applyFit(i) {
+        const f = S.fits[i];
+        S.fitIndex = i;
+        const more = i + 1 < S.fits.length;
+        const pct = Math.round(f.coverage * 100);
+        finishAlign(f.pos, f.quat, 'auto',
+            { text: `Auto-aligned to ${f.walls} scanned walls, ${pct}% matched${S.fits.length > 1 ? ` (fit ${i + 1} of ${S.fits.length})` : ''}`, color: pct >= 60 ? '#86efac' : '#fde047' },
+            `Aligned to the room scan. If the twin is off or turned round, press X for ${more ? 'the next fit' : 'the two-corner alignment'}.`);
+    }
+
+    // Runs in the frame loop while S.step === 'auto'. The planes arrive over the first frames, so it waits a second;
+    // without plane detection (or without usable walls after 5 s) it falls back to the two corners.
+    function autoAlign(time, frame) {
+        if (!S.autoStart) S.autoStart = time;
+        const waited = time - S.autoStart;
+        if (waited < 1000) return;
+        if (!frame.detectedPlanes) {
+            startCalibration();
+            flash('No room data (allow it in the browser, or run Space Setup): align with two corners.', 7000);
+            return;
+        }
+        let fits = frame.detectedPlanes.size ? fitToWalls(frame) : null;
+        if (fits) {
+            // Near-equal fits (a scan that misses the room's small notch matches it turned round as well): the one
+            // closest to the previous alignment goes first; X still steps to the others
+            const prev = S.onsitePose?.quat;
+            if (prev && fits.length > 1) {
+                const near = fits.filter(f => f.matched >= 0.9 * fits[0].matched).sort((a, b) => a.quat.angleTo(prev) - b.quat.angleTo(prev));
+                fits = [...near, ...fits.filter(f => !near.includes(f))];
+            }
+            S.fits = fits;
+            applyFit(0);
+        }
+        else if (waited > 5000) {
+            startCalibration();
+            flash('The scanned walls do not match the room: align with two corners (or redo Space Setup).', 7000);
+        }
     }
 
     function onSelect(src) {
         S.activeSource = src;
         const point = targets.get(src);
-        if (S.step === 'calibrate') {
-            if (!point) return flash('No surface found: aim the ray at the floor corner.');
-            pins[S.calPoints.length].position.copy(point);
+        if (S.step === 'calibrate' || S.step === 'touch') {
+            const touch = S.step === 'touch';
+            const ray = rays.get(src);
+            const p = touch ? ray && ray.origin.clone().addScaledVector(ray.dir, TOUCH_OFFSET) : point;
+            if (!p) return flash(touch ? 'Controller not tracked: hold it where the headset can see it.' : 'No surface found: aim the ray at the floor corner.');
+            pins[S.calPoints.length].position.copy(p);
             pins[S.calPoints.length].visible = true;
-            S.calPoints.push(point.clone());
-            if (S.calPoints.length === 2) solveCalibration(); else drawHelp();
+            S.calPoints.push(p.clone());
+            if (S.calPoints.length === 2) solveTwoPoints(touch ? 'touch' : 'corners'); else drawHelp();
+        } else if (S.step === 'auto') {
+            flash('Looking for the scanned walls...');
         } else if (S.step === 'place') {
             if (!point) return flash('No surface found: aim at a table or the floor.');
             S.step = 'placed';
@@ -432,31 +651,38 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
     function drawHelp() {
         const L = [];
         const P = preset();
-        L.push({ text: S.mode === 'onsite' ? 'ON-SITE  ·  1:1' : `TABLETOP  ·  1:${Math.round(1 / S.scale)}`, bold: true, size: 40, color: '#5eead4', gap: 6 });
+        const title = { onsite: 'ON-SITE  ·  1:1', conveyor: 'CONVEYOR  ·  1:1', tabletop: `TABLETOP  ·  1:${Math.round(1 / S.scale)}` };
+        L.push({ text: title[S.mode], bold: true, size: 40, color: '#5eead4', gap: 6 });
         if (S.step === 'calibrate') {
             const c = CALIBRATION[S.calPoints.length];
             L.push({ text: `Align, step ${S.calPoints.length + 1} of 2`, bold: true, size: 32 });
             L.push({ text: c.label, bold: true, size: 32, color: '#fde047' });
             L.push({ text: c.hint, size: 28, color: '#cbd5e1' });
             L.push({ text: 'Aim the ray exactly at that corner on the floor and pull the TRIGGER.', size: 28, gap: 10 });
+        } else if (S.step === 'touch') {
+            const t = TOUCH_POINTS[S.calPoints.length];
+            L.push({ text: `Align on the conveyor, step ${S.calPoints.length + 1} of 2`, bold: true, size: 32 });
+            L.push({ text: t.label, bold: true, size: 32, color: '#fde047' });
+            L.push({ text: t.hint, size: 28, color: '#cbd5e1' });
+            L.push({ text: 'Hold the controller so the YELLOW BALL sits exactly on that corner, then pull the TRIGGER.', size: 28, gap: 10 });
+        } else if (S.step === 'auto') {
+            L.push({ text: 'Aligning to the room scan...', bold: true, size: 32 });
+            L.push({ text: 'Look around the room for a moment. If the browser asks for room data, choose Allow.', size: 28, gap: 10 });
         } else if (S.step === 'place') {
             L.push({ text: 'Aim at a table or the floor. Pull the TRIGGER to put the model down.', size: 30, gap: 10 });
         } else {
             L.push({ text: `View ${S.preset + 1}/${PRESETS[S.mode].length}: ${P.name}`, bold: true, size: 32 });
             if (P.cloud && S.cloudState !== 'ready') L.push({ text: S.cloudState === 'error' ? 'Point cloud failed to load' : 'Loading point cloud (5 MB)...', size: 26, color: '#fde047' });
-            if (S.mode === 'onsite') {
-                if (S.calError !== null) {
-                    const cm = Math.abs(S.calError * 100);
-                    L.push({ text: `Corner distance error: ${cm.toFixed(1)} cm`, size: 26, color: cm <= 5 ? '#86efac' : cm <= 10 ? '#fde047' : '#fca5a5' });
-                }
+            if (oneToOne()) {
+                if (S.alignInfo) L.push({ text: S.alignInfo.text, size: 26, color: S.alignInfo.color });
                 if (S.anchorStatus) L.push({ text: S.anchorStatus, size: 26, color: '#94a3b8' });
             }
             L.push({ text: 'TRIGGER on an object or sensor: details', size: 28, gap: 10 });
         }
         if (S.message) L.push({ text: S.message, size: 28, color: '#fca5a5', gap: 10 });
-        L.push({ text: 'RIGHT   A: next view   B: on-site / tabletop', size: 26, color: '#e2e8f0' });
-        L.push({ text: `             stick: rotate  ·  ${S.mode === 'onsite' ? 'up / down' : 'bigger / smaller'}`, size: 26, color: '#e2e8f0' });
-        L.push({ text: `LEFT     X: ${S.mode === 'onsite' ? 're-align' : 're-place'}   Y: ${S.paused ? 'run' : 'pause'} animation`, size: 26, color: '#e2e8f0' });
+        L.push({ text: 'RIGHT   A: next view   B: next mode', size: 26, color: '#e2e8f0' });
+        L.push({ text: `             stick: rotate  ·  ${oneToOne() ? 'up / down' : 'bigger / smaller'}`, size: 26, color: '#e2e8f0' });
+        L.push({ text: `LEFT     X: ${realignLabel()}   Y: ${S.paused ? 'run' : 'pause'} animation`, size: 26, color: '#e2e8f0' });
         L.push({ text: '             stick: move   ·   click stick: exit AR', size: 26, color: '#e2e8f0' });
         help.draw(L);
     }
@@ -519,7 +745,7 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
         placement.quaternion.premultiply(tmpQ);
     }
     function adjusted(time) {
-        if (S.mode !== 'onsite') return;
+        if (!oneToOne()) return;
         S.anchor = null;  // stop following the old anchor; a new one is made when the sticks are released
         S.reanchorAt = time + 1000;
         S.anchorStatus = 'Adjusting...';
@@ -538,11 +764,11 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
             const placed = S.step === 'placed';
             if (src.handedness === 'right') {
                 if (edge(4) && placed) { S.preset = (S.preset + 1) % PRESETS[S.mode].length; applyPreset(); }
-                if (edge(5)) applyMode(S.mode === 'onsite' ? 'tabletop' : 'onsite');
+                if (edge(5)) applyMode(MODES[(MODES.indexOf(S.mode) + 1) % MODES.length]);
                 if (placed && (ax || ay)) {
-                    const pivot = S.mode === 'onsite' ? model.localToWorld(halo.position.clone()) : placement.position.clone();
-                    if (ax) rotateAbout(pivot, -ax * (S.mode === 'onsite' ? 0.25 : 0.9) * dt);
-                    if (ay && S.mode === 'onsite') placement.position.y -= ay * 0.1 * dt;
+                    const pivot = oneToOne() ? model.localToWorld(halo.position.clone()) : placement.position.clone();
+                    if (ax) rotateAbout(pivot, -ax * (oneToOne() ? 0.25 : 0.9) * dt);
+                    if (ay && oneToOne()) placement.position.y -= ay * 0.1 * dt;
                     if (ay && S.mode === 'tabletop') {
                         S.scale = THREE.MathUtils.clamp(S.scale * Math.exp(-ay * 0.8 * dt), 1 / 40, 1 / 2);
                         placement.scale.setScalar(S.scale);
@@ -551,11 +777,11 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
                     adjusted(time);
                 }
             } else if (src.handedness === 'left') {
-                if (edge(4)) { if (S.mode === 'onsite') startCalibration(); else { S.step = 'place'; drawHelp(); } }
+                if (edge(4)) realign();
                 if (edge(5)) { S.paused = !S.paused; drawHelp(); }
                 if (edge(3)) { session.end(); return; }
                 if (placed && (ax || ay)) {
-                    const speed = S.mode === 'onsite' ? 0.15 : 0.3;
+                    const speed = oneToOne() ? 0.15 : 0.3;
                     const fwd = new THREE.Vector3(head.fwd.x, 0, head.fwd.z).normalize();
                     const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
                     placement.position.addScaledVector(fwd, -ay * speed * dt).addScaledVector(right, ax * speed * dt);
@@ -618,12 +844,21 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
         const active = sources.includes(S.activeSource) ? S.activeSource : sources.find(s => s.handedness === 'right') || sources[0];
         const aim = active && targets.get(active);
         const aiming = S.step === 'calibrate' || S.step === 'place';
+        const touching = S.step === 'touch';
         reticle.visible = aiming && !!aim;
         if (reticle.visible) reticle.position.copy(aim);
         rayLines.forEach(({ c, line }) => {
             const p = c.userData.src && targets.get(c.userData.src);
-            line.scale.z = aiming && p ? c.position.distanceTo(p) : 3;
+            line.scale.z = touching ? TOUCH_OFFSET : aiming && p ? c.position.distanceTo(p) : 3;
         });
+        // Touch balls: drawn exactly where a trigger pull records the point (the same ray data as onSelect)
+        balls.forEach(b => { b.visible = false; });
+        if (touching) rays.forEach((r, src) => {
+            const ball = ballFor(src);
+            ball.position.copy(r.origin).addScaledVector(r.dir, TOUCH_OFFSET);
+            ball.visible = true;
+        });
+        if (S.step === 'auto') autoAlign(time, frame);
 
         // Tabletop: the model follows the aim point until it is put down
         if (S.mode === 'tabletop' && S.step === 'place') {
@@ -634,8 +869,8 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
         handleGamepads(time, dt);
         if (S.ended) return;
 
-        // On-site: follow the anchor (it corrects tracking drift); re-anchor after fine-tuning stops
-        if (S.mode === 'onsite' && S.step === 'placed') {
+        // 1:1 modes: follow the anchor (it corrects tracking drift); re-anchor after fine-tuning stops
+        if (oneToOne() && S.step === 'placed') {
             if (S.anchor && frame.trackedAnchors?.has(S.anchor)) {
                 const ap = frame.getPose(S.anchor.anchorSpace, refSpace);
                 if (ap) { placement.position.copy(ap.transform.position); placement.quaternion.copy(ap.transform.orientation); }
@@ -676,7 +911,9 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
     const saved = readSaved();
     if (saved?.pos && saved?.quat) {
         S.onsitePose = { pos: new THREE.Vector3().fromArray(saved.pos), quat: new THREE.Quaternion().fromArray(saved.quat) };
-        S.calError = saved.calError ?? null;
+        S.align = 'restored';  // X then starts a fresh automatic alignment
+        S.alignInfo = saved.info
+            || (typeof saved.calError === 'number' ? { text: `Corner distance error: ${Math.abs(saved.calError * 100).toFixed(1)} cm`, color: '#94a3b8' } : null);
         S.anchorUuid = saved.uuid || null;
         S.anchorStatus = 'Restored last alignment (pose)';
         if (saved.uuid && session.restorePersistentAnchor) {
@@ -705,7 +942,7 @@ export async function startTwinAR({ twin, mode = 'onsite', summary = null, runni
         });
         Object.values(mats).forEach(m => m.dispose());
         xrayMats.forEach(m => m.dispose());
-        [haloMat, reticle.material, ...pins.map(p => p.material), ...markers.map(m => m.material)].forEach(m => m.dispose());
+        [haloMat, reticle.material, ballMat, ...pins.map(p => p.material), ...markers.map(m => m.material)].forEach(m => m.dispose());
         renderer.dispose();
         renderer.domElement.remove();
         onEnd?.();

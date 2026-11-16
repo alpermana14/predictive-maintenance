@@ -102,19 +102,22 @@ python export_cloud.py <repo>/frontend/public/twin
 
 
 ### 🥽 Mixed reality on Meta Quest 3
-The same twin runs in the headset as WebXR mixed reality, with the Quest 3 colour passthrough behind it. No app has to be installed. The dashboard is opened in the **Meta Quest Browser**, and the **AR on-site** and **AR tabletop** buttons on the Digital Twin card start the session. The code is in `frontend/src/twin/arSession.js`. The model geometry is shared with the dashboard viewer through `frontend/src/twin/twinModel.js`.
+The same twin runs in the headset as WebXR mixed reality, with the Quest 3 colour passthrough behind it. No app has to be installed. The dashboard is opened in the **Meta Quest Browser**, and the **AR on-site**, **AR conveyor** and **AR tabletop** buttons on the Digital Twin card start the session. The code is in `frontend/src/twin/arSession.js`. The model geometry is shared with the dashboard viewer through `frontend/src/twin/twinModel.js`.
 
-* **AR on-site (1:1):** the twin is aligned to the real lab by aiming at two floor corners: the south-west corner, on the conveyor/AC wall at the end away from the conveyor, and the north-west corner, at the far end of that west wall on the TV wall. The alignment is stored as a persistent WebXR anchor, so it only has to be done once per headset. The headset then shows a status box around the conveyor in the ISO zone colour, the sensor markers, and a live card with the `/api/summary` values.
+* **AR on-site (1:1):** the twin is aligned **automatically**: the room outline is fitted to the walls of the headset's Space Setup (WebXR plane detection; the browser asks once for room data). If the fit is off or turned round, **X** tries the next fit and then the manual alignment: aiming the ray at two floor corners (the south-west corner, on the conveyor/AC wall at the end away from the conveyor, and the north-west corner, at the far end of that west wall on the TV wall). The headset shows a status box around the conveyor in the ISO zone colour, the sensor markers, and a live card with the `/api/summary` values.
+* **AR conveyor (1:1):** only the conveyor, the motor, the sensors and the live card. It is aligned by touching two corners of the conveyor frame with the controller: a yellow ball in front of the controller is put on the top corner of the frame at the motor end and then at the far end, both on the long side facing the room. No ray is involved, so the conveyor lines up to about a centimetre.
 * **AR tabletop:** a scale model of the lab (1:12 by default) is placed on a table or the floor.
+
+On-site and conveyor share one alignment, stored as a persistent WebXR anchor: it is restored in every later session on the same headset and Meta account, so visitors only press the button. **Reset AR alignment** on the dashboard (or **X** in the headset) aligns again.
 
 | Controller | Button | Action |
 |---|---|---|
-| Right | Trigger | Mark a corner, place the model, or show details of the object or sensor you point at |
-| Right | A | Next view (on-site: status overlay, x-ray conveyor, scan point-cloud check, full twin) |
-| Right | B | Switch between on-site and tabletop |
-| Right | Stick | Rotate; up/down (on-site) or size (tabletop) |
-| Left | X | Align again (on-site) or place again (tabletop) |
+| Right | Trigger | Mark a corner or conveyor point, place the model, or show details of the object or sensor you point at |
+| Right | A | Next view (on-site: status overlay, x-ray conveyor, scan point-cloud check, full twin; conveyor: x-ray, solid, status overlay) |
+| Right | B | Next mode: on-site, conveyor, tabletop |
+| Right | Stick | Rotate around the conveyor; up/down (1:1 modes) or size (tabletop) |
+| Left | X | Align again (on-site: auto, next fit, two corners; conveyor: touch the two points) or place again (tabletop) |
 | Left | Y | Pause or run the conveyor animation |
 | Left | Stick | Move the model; click the stick to leave AR |
 
-Requirements: HTTPS (the deployed site), and a Space Setup of the lab on the headset so the aiming ray hits real surfaces. Without a Space Setup, the ray falls back to the floor plane. For local testing, connect the headset by USB in developer mode, run `adb reverse tcp:5173 tcp:5173` and `adb reverse tcp:8000 tcp:8000`, and open `http://localhost:5173` in the Quest Browser.
+Requirements: HTTPS (the deployed site), and a Space Setup of the lab on the headset, with all walls, for the automatic alignment and so the aiming ray hits real surfaces. Without a Space Setup, on-site falls back to the two corners and the ray to the floor plane; the conveyor mode does not need it. For local testing, connect the headset by USB in developer mode, run `adb reverse tcp:5173 tcp:5173` and `adb reverse tcp:8000 tcp:8000`, and open `http://localhost:5173` in the Quest Browser.

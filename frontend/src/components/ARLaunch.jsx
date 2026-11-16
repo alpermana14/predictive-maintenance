@@ -60,8 +60,12 @@ export default function ARLaunch({ twin, summary, running }) {
     return (
         <>
             <button className={cls} disabled={!enabled} onClick={() => start('onsite')}
-                title={reason || 'Overlay the twin 1:1 on the real conveyor (align once with two floor corners)'}>
+                title={reason || 'Overlay the twin 1:1 on the real lab (aligned automatically to the headset\'s room scan)'}>
                 AR on-site
+            </button>
+            <button className={cls} disabled={!enabled} onClick={() => start('conveyor')}
+                title={reason || 'Only the conveyor at 1:1 (align by touching two corners of its frame with the controller)'}>
+                AR conveyor
             </button>
             <button className={cls} disabled={!enabled} onClick={() => start('tabletop')}
                 title={reason || 'Place a scale model of the lab on a table'}>
@@ -70,7 +74,7 @@ export default function ARLaunch({ twin, summary, running }) {
             {support === 'yes' && !active && (
                 <button className="px-2 py-1.5 rounded-md text-xs border border-gray-200 text-gray-500 hover:bg-gray-50"
                     onClick={() => { clearSavedAlignment(); setCleared(true); }}
-                    title="Forget the saved on-site alignment, so the next AR on-site session starts with the two-corner alignment">
+                    title="Forget the saved 1:1 alignment, so the next AR on-site (or AR conveyor) session aligns again">
                     {cleared ? 'Alignment reset' : 'Reset AR alignment'}
                 </button>
             )}
