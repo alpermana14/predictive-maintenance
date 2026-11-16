@@ -100,3 +100,21 @@ python export_twin.py  <repo>/frontend/public/twin
 python export_cloud.py <repo>/frontend/public/twin
 ```
 
+
+### 🥽 Mixed reality on Meta Quest 3
+The same twin runs in the headset as WebXR mixed reality, with the Quest 3 colour passthrough behind it. No app has to be installed. The dashboard is opened in the **Meta Quest Browser**, and the **AR on-site** and **AR tabletop** buttons on the Digital Twin card start the session. The code is in `frontend/src/twin/arSession.js`. The model geometry is shared with the dashboard viewer through `frontend/src/twin/twinModel.js`.
+
+* **AR on-site (1:1):** the twin is aligned to the real lab by aiming at two floor corners: the south-west corner, on the conveyor/AC wall at the end away from the conveyor, and the north-west corner, at the far end of that west wall on the TV wall. The alignment is stored as a persistent WebXR anchor, so it only has to be done once per headset. The headset then shows a status box around the conveyor in the ISO zone colour, the sensor markers, and a live card with the `/api/summary` values.
+* **AR tabletop:** a scale model of the lab (1:12 by default) is placed on a table or the floor.
+
+| Controller | Button | Action |
+|---|---|---|
+| Right | Trigger | Mark a corner, place the model, or show details of the object or sensor you point at |
+| Right | A | Next view (on-site: status overlay, x-ray conveyor, scan point-cloud check, full twin) |
+| Right | B | Switch between on-site and tabletop |
+| Right | Stick | Rotate; up/down (on-site) or size (tabletop) |
+| Left | X | Align again (on-site) or place again (tabletop) |
+| Left | Y | Pause or run the conveyor animation |
+| Left | Stick | Move the model; click the stick to leave AR |
+
+Requirements: HTTPS (the deployed site), and a Space Setup of the lab on the headset so the aiming ray hits real surfaces. Without a Space Setup, the ray falls back to the floor plane. For local testing, connect the headset by USB in developer mode, run `adb reverse tcp:5173 tcp:5173` and `adb reverse tcp:8000 tcp:8000`, and open `http://localhost:5173` in the Quest Browser.
