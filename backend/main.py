@@ -1,10 +1,13 @@
 import os
 import secrets
 import uuid
+import json
+import time
+import threading
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from pydantic import BaseModel
@@ -35,7 +38,17 @@ app.add_middleware(
     allow_origins=["*"],  # In production, specify "http://localhost:5173"
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Server-Timing"],  # read by the mixed-reality client to split its round trip
 )
+
+
+@app.middleware("http")
+async def server_timing(request: Request, call_next):
+    """Adds the server-side processing time to every response (Server-Timing: app;dur=<ms>)."""
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    response.headers["Server-Timing"] = f"app;dur={(time.perf_counter() - t0) * 1000:.1f}"
+    return response
 
 # Global State Container (Holds the latest analysis in memory)
 class MachineState:
@@ -50,6 +63,9 @@ class MachineState:
     shift_events = None  # flagged windows of the last 7 days
     shift_episode = None  # open distribution-shift episode, kept until an operator reviews it
     last_row_id = None    # newest MySQL row already analysed (new-data check)
+    hitl_seq = 0          # number of operator actions (review, approve, reject) since start-up
+    last_action = None    # the latest operator action, so a client can confirm its own action took effect
+    last_cycle = None     # timing of the latest analytics cycle (new row detected, compute time)
 
 state = MachineState()
 state.forecast_log = []
@@ -156,6 +172,40 @@ def mark_shift_reviewed(reviewer: str, note: str, source: str):
                         since=state.shift_episode["since"], channels=state.shift_episode["channels"])
 
 
+def record_action(kind: str, actor: str, source: str):
+    """Counts an operator action; /api/summary returns it so a client sees its action reflected in the state."""
+    state.hitl_seq += 1
+    state.last_action = {"seq": state.hitl_seq, "kind": kind, "actor": actor, "source": source,
+                         "time_utc": datetime.utcnow().isoformat(timespec="milliseconds") + "Z"}
+
+
+def forecast_points() -> dict:
+    """Latest value and forecast at +1 h, +3 h and +6 h per channel (for compact views such as mixed reality)."""
+    if state.data is None or state.forecast is None:
+        return {}
+    latest = state.data.iloc[-1]
+    out = {}
+    for tgt in TARGETS:
+        if tgt not in state.forecast.columns:
+            continue
+        pts = {"now": round(float(latest[tgt]), 3)}
+        pts.update({label: round(float(state.forecast[tgt].iloc[step - 1]), 3) for label, step in FORECAST_POINTS.items()})
+        out[tgt] = pts
+    return out
+
+
+def draft_list() -> list:
+    """Copilot drafts waiting for a named approver: session id, first line and length (not the full text)."""
+    out = []
+    for sid, text in DRAFT_STORE.items():
+        clean = (text or "").replace("*", "").strip()
+        if not clean:
+            continue
+        first = next((ln.strip(" #-") for ln in clean.splitlines() if ln.strip(" #-")), "")
+        out.append({"session_id": sid, "title": first[:90], "chars": len(clean)})
+    return out
+
+
 def build_forecast_summary(data: pd.DataFrame, forecast: pd.DataFrame, targets: list) -> dict:
     """Forecast trajectory (+1 h, +3 h, +6 h), change over 6 h and recent error, per channel."""
     latest = data.iloc[-1]
@@ -183,6 +233,7 @@ def update_machine_state():
     4. Updates the global 'state' object
     """
     print(f"[INFO] Scheduler starting update cycle at {datetime.now().strftime('%H:%M:%S')}...")
+    started_utc, t0 = datetime.utcnow(), time.perf_counter()
     
     try:
         # Load fresh data from SQL
@@ -200,6 +251,12 @@ def update_machine_state():
         update_shift_state(df)
 
         state.last_update = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        state.last_cycle = {
+            "detected_utc": getattr(state, "detected_utc", None),
+            "started_utc": started_utc.isoformat(timespec="seconds") + "Z",
+            "compute_s": round(time.perf_counter() - t0, 2),
+            "reading_time": str(df.attrs.get("last_reading", df.index[-1])),
+        }
         print(f"[INFO] Scheduler updated successfully. Last data point: {df.index[-1]}")
 
         # Push latest data to Bentley iTwin IoT (if configured)
@@ -228,6 +285,7 @@ def check_for_new_data():
     print(f"[INFO] New sensor row {row_id} in MySQL (last analysed: {state.last_row_id})")
     # Recorded before the run, so a failing cycle is retried on the next new row instead of every check
     state.last_row_id = row_id
+    state.detected_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     update_machine_state()
 
 @app.on_event("startup")
@@ -333,6 +391,15 @@ def get_summary():
         "shift_episode": state.shift_episode,
         "shift_reminder": current_reminder(),  # notice for an episode left unreviewed too long
         "replay": getattr(state, "replay_label", None),  # set only by scripts/replay_dashboard.py
+        # compact views (mixed reality): forecast points, s-IDK^2 scores, drafts waiting for approval,
+        # the latest operator action and the timing of the latest analytics cycle
+        "forecast": forecast_points(),
+        "shift_scores": {ch: {"score": round(float(st["latest_score"]), 4), "threshold": round(float(st["threshold"]), 4),
+                              "flagged": bool(st["latest_flag"])} for ch, st in (state.shift_status or {}).items()},
+        "drafts": draft_list(),
+        "hitl": {"seq": state.hitl_seq, "last": state.last_action},
+        "cycle": state.last_cycle,
+        "server_time_utc": datetime.utcnow().isoformat(timespec="milliseconds") + "Z",
     }
 
 @app.get("/api/forecast/{target}")
@@ -380,6 +447,7 @@ def get_anomalies(target: str):
 
 class ShiftReviewRequest(BaseModel):
     note: str = ""
+    source: str = "dashboard"  # "dashboard" or "mixed_reality"
 
 
 @app.post("/api/shift/review")
@@ -389,7 +457,8 @@ def review_shift(req: ShiftReviewRequest, x_approver_token: Optional[str] = Head
     if not state.shift_episode or state.shift_episode.get("reviewed"):
         raise HTTPException(status_code=400, detail="No open distribution-shift episode.")
     mark_shift_reviewed(reviewer, req.note.strip(), source="shift_review")
-    return {"status": "reviewed", "episode": state.shift_episode}
+    record_action("shift_reviewed", reviewer, req.source)
+    return {"status": "reviewed", "episode": state.shift_episode, "hitl_seq": state.hitl_seq}
 
 @app.get("/api/importance")
 def get_importance():
@@ -706,11 +775,13 @@ def _authorise(token: Optional[str]) -> str:
 class ApprovalRequest(BaseModel):
     session_id: str
     content: Optional[str] = None  # the text as edited by the operator; None = approve the draft unchanged
+    source: str = "dashboard"
 
 
 class RejectionRequest(BaseModel):
     session_id: str
     reason: str
+    source: str = "dashboard"
 
 
 @app.post("/api/work_orders/approve")
@@ -756,7 +827,8 @@ def approve_work_order(req: ApprovalRequest, x_approver_token: Optional[str] = H
             draft_sha256=audit.content_hash(draft), content_sha256=audit.content_hash(content_clean),
             draft_chars=len(draft), content_chars=len(content_clean),
         )
-        return {"status": "success", "work_order_id": work_order_id, "modified": modified}
+        record_action("work_order_approved", approver, req.source)
+        return {"status": "success", "work_order_id": work_order_id, "modified": modified, "hitl_seq": state.hitl_seq}
     except Exception as e:
         print(f"[ERROR] Failed to approve work order for session {req.session_id}: {e}")
         raise HTTPException(
@@ -780,4 +852,31 @@ def reject_work_order(req: RejectionRequest, x_approver_token: Optional[str] = H
         "work_order_rejected", approver=approver, session_id=req.session_id,
         reason=req.reason.strip(), draft_sha256=audit.content_hash(draft), draft_chars=len(draft),
     )
-    return {"status": "rejected"}
+    record_action("work_order_rejected", approver, req.source)
+    return {"status": "rejected", "hitl_seq": state.hitl_seq}
+
+# ===================== MIXED-REALITY MEASUREMENT LOG =====================
+# Off unless AR_LOG_ENABLED=1 (set only for measurement sessions). The headset posts registration checkpoints,
+# frame-rate samples and the timing of its operator actions; each record is stored with the server receive time.
+AR_LOG_PATH = os.getenv("AR_LOG_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "ar_log.jsonl"))
+_AR_LOG_LOCK = threading.Lock()
+
+
+@app.post("/api/ar/log")
+async def ar_log(request: Request):
+    if os.getenv("AR_LOG_ENABLED", "0").strip() != "1":
+        raise HTTPException(status_code=404, detail="Measurement log is disabled.")
+    body = await request.body()
+    if len(body) > 64_000:
+        raise HTTPException(status_code=413, detail="Log record too large.")
+    try:
+        records = json.loads(body)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Body must be JSON.")
+    records = records if isinstance(records, list) else [records]
+    now = datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+    with _AR_LOG_LOCK, open(AR_LOG_PATH, "a", encoding="utf-8") as f:
+        for r in records:
+            if isinstance(r, dict):
+                f.write(json.dumps({"server_utc": now, **r}, default=str) + "\n")
+    return {"stored": len(records)}

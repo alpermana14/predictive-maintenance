@@ -25,3 +25,4 @@ Thumbs.db
 # --- Demo replay (demo/) ---
 demo/cache/
 demo/results/
+backend/ar_log.jsonl
