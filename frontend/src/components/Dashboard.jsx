@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import axios from 'axios';
+import { logDashboardAction } from '../twin/hitl';
 import {
     LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
     ReferenceLine, ScatterChart, Scatter, Cell, BarChart, Bar, ReferenceArea
@@ -234,7 +235,9 @@ export default function Dashboard() {
         if (note === null) return;
         try {
             setReviewing(true);
-            await axios.post(`${API_URL}/api/shift/review`, { note }, { headers: { "X-Approver-Token": token } });
+            const t0 = performance.now();
+            const reviewRes = await axios.post(`${API_URL}/api/shift/review`, { note }, { headers: { "X-Approver-Token": token } });
+            logDashboardAction("ack", t0, reviewRes);  // measurement sessions (?measure) only
             const res = await axios.get(`${API_URL}/api/summary`);
             setSummary(res.data);
         } catch (err) {

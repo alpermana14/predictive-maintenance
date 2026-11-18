@@ -58,6 +58,25 @@ export async function fetchSummary() {
     return res.json();
 }
 
+// Measurement sessions only: timing of an action taken on the 2D dashboard (the baseline of the headset actions).
+// t_cmd is taken just before the request; the round trip ends when /api/summary shows the action's sequence number.
+export async function logDashboardAction(action, t_cmd, res) {
+    if (!MEASURE) return;
+    const rtt = performance.now() - t_cmd;
+    const m = /app;dur=([\d.]+)/.exec(res?.headers?.['server-timing'] || '');
+    const want = res?.data?.hitl_seq;
+    let confirm = null;
+    for (let i = 0; i < 40 && want != null; i++) {
+        try {
+            const s = await fetchSummary();
+            if ((s.hitl?.seq ?? 0) >= want) { confirm = performance.now() - t_cmd; break; }
+        } catch { /* retry */ }
+        await new Promise(r => setTimeout(r, 250));
+    }
+    logRecord('action', { action, client: 'dashboard', ok: true, status: res?.status, rtt_ms: rtt,
+        server_ms: m ? parseFloat(m[1]) : null, confirm_ms: confirm });
+}
+
 // Measurement log: batched, fire-and-forget; never blocks or breaks the AR session
 const queue = [];
 let timer = null;

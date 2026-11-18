@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+import { logDashboardAction } from '../twin/hitl';
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
 // Demo deployment (VITE_APPROVAL_MODE=open, set in the deploy workflow): no approver token is asked for
@@ -211,11 +212,13 @@ export default function Chatbot() {
         try {
             setLoading(true);
             // The operator may have edited the draft; the edited text is what gets saved
+            const t0 = performance.now();
             const res = await axios.post(
                 `${API_URL}/api/work_orders/approve`,
                 { session_id: sessionId, content: draft },
                 { headers: { "X-Approver-Token": token } }
             );
+            logDashboardAction("approve", t0, res);  // measurement sessions (?measure) only
             setDraft(""); // Hide the yellow box
             setMessages(prev => [...prev, {
                 role: 'ai',
@@ -235,11 +238,13 @@ export default function Chatbot() {
         if (!token) return;
         try {
             setLoading(true);
-            await axios.post(
+            const t0 = performance.now();
+            const res = await axios.post(
                 `${API_URL}/api/work_orders/reject`,
                 { session_id: sessionId, reason },
                 { headers: { "X-Approver-Token": token } }
             );
+            logDashboardAction("reject", t0, res);  // measurement sessions (?measure) only
             setDraft("");
             setMessages(prev => [...prev, { role: 'ai', content: "❌ Draft rejected. Nothing was saved to the work order history." }]);
         } catch (err) {
